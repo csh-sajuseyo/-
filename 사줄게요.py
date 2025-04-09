@@ -1,4 +1,3 @@
-
 import sys
 import os
 import atexit
@@ -7,7 +6,7 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtGui import QFont
 from PyQt5.QtCore import Qt, QTimer
-from sheet_api import get_today_request_count
+from sheet_api import get_today_request_count, get_today_pending_requests
 
 class SajulgeyoApp(QWidget):
     def __init__(self):
@@ -67,8 +66,12 @@ class SajulgeyoApp(QWidget):
 
     def load_sheet(self):
         try:
-            count = get_today_request_count()
+            rows = get_today_pending_requests()
+            count = len(rows)
             self.request_count_label.setText(f"오늘 요청 건수: {count}")
+            print("🔍 오늘 요청 목록:")
+            for row in rows:
+                print(row)
         except Exception as e:
             QMessageBox.critical(self, "오류", f"구매요청서 불러오기 실패:\n{str(e)}")
 

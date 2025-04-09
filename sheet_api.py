@@ -1,4 +1,3 @@
-
 from __future__ import print_function
 import datetime
 import os.path
@@ -37,19 +36,20 @@ def get_today_request_count():
 
     count = 0
     for row in values:
-        if len(row) >= 7:
+        if len(row) >= 5:
             try:
-                request_date = datetime.datetime.fromisoformat(row[6].strip()).date()
+                request_date = datetime.datetime.fromisoformat(row[4]).date()
                 if request_date == today:
                     count += 1
-            except Exception:
+            except:
                 continue
     return count
 
 
-def get_pending_requests():
+
+def get_today_pending_requests():
     """
-    시트에서 '구매완료'가 아닌 항목만 필터링하여 반환
+    오늘 날짜(G열) + '구매완료'가 아닌 요청만 반환
     """
     creds = None
     if os.path.exists('token.json'):
@@ -66,12 +66,22 @@ def get_pending_requests():
     service = build('sheets', 'v4', credentials=creds)
     sheet = service.spreadsheets()
 
+    seoul_tz = pytz.timezone('Asia/Seoul')
+    today = datetime.datetime.now(seoul_tz).date()
+
     result = sheet.values().get(
         spreadsheetId=SPREADSHEET_ID,
         range=RANGE_NAME
     ).execute()
     values = result.get('values', [])
 
-    # '구매완료'가 아닌 항목만 필터링 (8번째 열 기준)
-    pending = [row for row in values if len(row) < 8 or row[7].strip() != "구매완료"]
-    return pending
+    filtered = []
+    for row in values:
+        if len(row) >= 7:
+            try:
+                request_date = datetime.datetime.fromisoformat(row[6].strip()).date()
+                if request_date == today and (len(row) < 8 or row[7].strip() != "구매완료"):
+                    filtered.append(row)
+            except Exception:
+                continue
+    return filtered
