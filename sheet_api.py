@@ -11,7 +11,7 @@ from googleapiclient.discovery import build
 
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets.readonly']
 SPREADSHEET_ID = '1KbY0lHEGGrkVNWER5iJsGM4dIYp69r7cJbzkPOdr3xk'
-RANGE_NAME = 'auto_requests_data!A2:H'  # 수정된 탭 이름 반영
+RANGE_NAME = '시트1!A2:H'  # 수정된 탭 이름 반영
 
 def get_today_request_count():
     creds = None
@@ -37,11 +37,41 @@ def get_today_request_count():
 
     count = 0
     for row in values:
-        if len(row) >= 5:
+        if len(row) >= 7:
             try:
-                request_date = datetime.datetime.fromisoformat(row[4]).date()
+                request_date = datetime.datetime.fromisoformat(row[6].strip()).date()
                 if request_date == today:
                     count += 1
-            except:
+            except Exception:
                 continue
     return count
+
+
+def get_pending_requests():
+    """
+    시트에서 '구매완료'가 아닌 항목만 필터링하여 반환
+    """
+    creds = None
+    if os.path.exists('token.json'):
+        creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
+            creds = flow.run_local_server(port=0)
+        with open('token.json', 'w') as token:
+            token.write(creds.to_json())
+
+    service = build('sheets', 'v4', credentials=creds)
+    sheet = service.spreadsheets()
+
+    result = sheet.values().get(
+        spreadsheetId=SPREADSHEET_ID,
+        range=RANGE_NAME
+    ).execute()
+    values = result.get('values', [])
+
+    # '구매완료'가 아닌 항목만 필터링 (8번째 열 기준)
+    pending = [row for row in values if len(row) < 8 or row[7].strip() != "구매완료"]
+    return pending
