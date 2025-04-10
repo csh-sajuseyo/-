@@ -11,6 +11,8 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtGui import QFont, QCursor
 from PyQt5.QtCore import Qt, QTimer
 from sheet_api import get_today_pending_requests
+from edu_ocr_reader import capture_and_extract_text
+from ocr_text_parser import extract_items_with_amount
 
 class SajulgeyoApp(QWidget):
     def __init__(self):
@@ -41,7 +43,7 @@ class SajulgeyoApp(QWidget):
         layout.addLayout(self.create_status_row("1.   📇 연락처 불러오기", self.load_contact, self.contact_status, "#e0f3ff", "#d0eaff"))
         layout.addLayout(self.create_status_row("2.   🔗 쇼핑몰 연결 시작하기", self.connect_shopping_mall, self.mall_status, "#f0e7ff", "#e2d6ff"))
         layout.addLayout(self.create_status_row("3.   📂 구매요청서 불러오기", self.load_sheet, self.sheet_status, "#fff9e0", "#fff1c2"))
-        layout.addLayout(self.create_status_row("4.   📑 에듀파인 결재 확인 열기", self.dummy_action, self.edu_status, "#fff2e0", "#ffe5c2"))
+        layout.addLayout(self.create_status_row("4.   📑 에듀파인 결재 확인 열기", self.run_edu_ocr, self.edu_status, "#fff2e0", "#ffe5c2"))
         layout.addLayout(self.create_status_row("5.   🖼️ 구매 품목 스크린샷 확인", self.dummy_action, self.shot_status, "#e0fff4", "#c2ffe8"))
 
         line = QFrame()
@@ -108,6 +110,24 @@ class SajulgeyoApp(QWidget):
             screen.center().x() - self.width() // 2,
             screen.center().y() - self.height() // 2
         )
+
+    def run_edu_ocr(self):
+        success, ocr_text = capture_and_extract_text()
+        if success:
+            try:
+                items = extract_items_with_amount(ocr_text)
+                if items:
+                    display = "\n".join([f"- {name.strip()} : {price}원" for name, price in items])
+                else:
+                    display = "📭 인식된 품목이 없습니다."
+                QMessageBox.information(self, "OCR 결과", display)
+                self.edu_status.setText("✅")
+            except Exception as e:
+                QMessageBox.critical(self, "후처리 오류", str(e))
+                self.edu_status.setText("❌")
+        else:
+            QMessageBox.critical(self, "OCR 실패", ocr_text)
+            self.edu_status.setText("❌")
 
     def dummy_action(self):
         QMessageBox.information(self, "준비 중", "해당 기능은 곧 지원됩니다!")
