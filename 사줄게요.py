@@ -1,8 +1,8 @@
-
 import sys
 import os
 import shutil
 import atexit
+import subprocess
 from openpyxl import load_workbook
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton, QVBoxLayout,
@@ -32,28 +32,24 @@ class SajulgeyoApp(QWidget):
         self.request_count_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.request_count_label)
 
-        # 상태 표시 라벨 초기화 (❔ 미확인 상태)
         self.contact_status = self.make_status_label()
         self.mall_status = self.make_status_label()
         self.sheet_status = self.make_status_label()
         self.edu_status = self.make_status_label()
         self.shot_status = self.make_status_label()
 
-        # 버튼 + 상태 표시 구성 (숫자 정렬 포함)
         layout.addLayout(self.create_status_row("1.   📇 연락처 불러오기", self.load_contact, self.contact_status, "#e0f3ff", "#d0eaff"))
-        layout.addLayout(self.create_status_row("2.   🔗 쇼핑몰 연결 시작하기", self.dummy_action, self.mall_status, "#f0e7ff", "#e2d6ff"))
+        layout.addLayout(self.create_status_row("2.   🔗 쇼핑몰 연결 시작하기", self.connect_shopping_mall, self.mall_status, "#f0e7ff", "#e2d6ff"))
         layout.addLayout(self.create_status_row("3.   📂 구매요청서 불러오기", self.load_sheet, self.sheet_status, "#fff9e0", "#fff1c2"))
         layout.addLayout(self.create_status_row("4.   📑 에듀파인 결재 확인 열기", self.dummy_action, self.edu_status, "#fff2e0", "#ffe5c2"))
         layout.addLayout(self.create_status_row("5.   🖼️ 구매 품목 스크린샷 확인", self.dummy_action, self.shot_status, "#e0fff4", "#c2ffe8"))
 
-        # 구분선
         line = QFrame()
         line.setFrameShape(QFrame.HLine)
         line.setFrameShadow(QFrame.Sunken)
         line.setStyleSheet("color: #ccc; margin: 15px 0;")
         layout.addWidget(line)
 
-        # 실행 버튼
         self.run_btn = QPushButton("🚀 물품 자동구매 시작하기")
         self.run_btn.setFont(QFont("맑은 고딕", 11, QFont.Bold))
         self.run_btn.setCursor(QCursor(Qt.PointingHandCursor))
@@ -116,6 +112,23 @@ class SajulgeyoApp(QWidget):
     def dummy_action(self):
         QMessageBox.information(self, "준비 중", "해당 기능은 곧 지원됩니다!")
 
+    def connect_shopping_mall(self):
+        chrome_path = "C:/Program Files/Google/Chrome/Application/chrome.exe"
+        user_data = os.path.join(os.getcwd(), "UserData")
+        url = "https://login.coupang.com"
+        command = [
+            chrome_path,
+            "--remote-debugging-port=9222",
+            f"--user-data-dir={user_data}",
+            url
+        ]
+        try:
+            subprocess.Popen(command)
+            self.mall_status.setText("✅")
+        except Exception as e:
+            QMessageBox.critical(self, "실행 오류", f"크롬 실행 실패:\n{e}")
+            self.mall_status.setText("❌")
+
     def load_contact(self):
         file_path, _ = QFileDialog.getOpenFileName(self, "연락처 엑셀파일 선택", "", "Excel Files (*.xlsx)")
         if file_path:
@@ -154,20 +167,16 @@ class SajulgeyoApp(QWidget):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     CUSTOM_TEMP_DIR = os.path.join(BASE_DIR, "temp")
     os.makedirs(CUSTOM_TEMP_DIR, exist_ok=True)
     LOCK_FILE_PATH = os.path.join(CUSTOM_TEMP_DIR, "sajulgeyo.lock")
-
     if os.path.exists(LOCK_FILE_PATH):
         QMessageBox.critical(None, "중복 실행 차단", "❌ 사줄게요가 이미 실행 중입니다.")
         sys.exit(0)
-
     with open(LOCK_FILE_PATH, "w", encoding="utf-8") as f:
         f.write("🔐 락파일 생성됨")
     atexit.register(lambda: os.remove(LOCK_FILE_PATH) if os.path.exists(LOCK_FILE_PATH) else None)
-
     window = SajulgeyoApp()
     window.show()
     sys.exit(app.exec_())
