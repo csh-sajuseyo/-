@@ -35,16 +35,16 @@ class SajulgeyoApp(QWidget):
         # 상태 표시 라벨 초기화 (❔ 미확인 상태)
         self.contact_status = self.make_status_label()
         self.mall_status = self.make_status_label()
+        self.sheet_status = self.make_status_label()
         self.edu_status = self.make_status_label()
         self.shot_status = self.make_status_label()
-        self.sheet_status = self.make_status_label()
 
-        # 버튼 + 상태 표시 구성
-        layout.addLayout(self.create_status_row("📇 연락처 불러오기", self.load_contact, self.contact_status, "#e0f3ff", "#d0eaff"))
-        layout.addLayout(self.create_status_row("🔗 쇼핑몰 연결 시작하기", self.dummy_action, self.mall_status, "#f0e7ff", "#e2d6ff"))
-        layout.addLayout(self.create_status_row("📑 에듀파인 결재 확인 열기", self.dummy_action, self.edu_status, "#fff2e0", "#ffe5c2"))
-        layout.addLayout(self.create_status_row("🖼️ 스크린샷 확인", self.dummy_action, self.shot_status, "#e0fff4", "#c2ffe8"))
-        layout.addLayout(self.create_status_row("📂 구매요청서 불러오기", self.load_sheet, self.sheet_status, "#fff9e0", "#fff1c2"))
+        # 버튼 + 상태 표시 구성 (숫자 정렬 포함)
+        layout.addLayout(self.create_status_row("1.   📇 연락처 불러오기", self.load_contact, self.contact_status, "#e0f3ff", "#d0eaff"))
+        layout.addLayout(self.create_status_row("2.   🔗 쇼핑몰 연결 시작하기", self.dummy_action, self.mall_status, "#f0e7ff", "#e2d6ff"))
+        layout.addLayout(self.create_status_row("3.   📂 구매요청서 불러오기", self.load_sheet, self.sheet_status, "#fff9e0", "#fff1c2"))
+        layout.addLayout(self.create_status_row("4.   📑 에듀파인 결재 확인 열기", self.dummy_action, self.edu_status, "#fff2e0", "#ffe5c2"))
+        layout.addLayout(self.create_status_row("5.   🖼️ 구매 품목 스크린샷 확인", self.dummy_action, self.shot_status, "#e0fff4", "#c2ffe8"))
 
         # 구분선
         line = QFrame()
@@ -95,6 +95,7 @@ class SajulgeyoApp(QWidget):
             f" background-color: {base_color};"
             f" border: 1px solid #aaa;"
             f" border-radius: 4px;"
+            f" text-align: left;"
             f"}}"
             f"QPushButton:hover {{"
             f" background-color: {hover_color};"
