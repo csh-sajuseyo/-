@@ -5,6 +5,7 @@ import atexit
 import subprocess
 from openpyxl import load_workbook
 from PyQt5.QtWidgets import (
+    QTableWidget, QTableWidgetItem, QDialog, QVBoxLayout as QVBoxLayout2,
     QApplication, QWidget, QLabel, QPushButton, QVBoxLayout,
     QHBoxLayout, QMessageBox, QFileDialog, QFrame
 )
@@ -110,18 +111,30 @@ class SajulgeyoApp(QWidget):
             screen.center().x() - self.width() // 2,
             screen.center().y() - self.height() // 2
         )
-
     def run_edu_ocr(self):
         success, ocr_text = capture_and_extract_text()
         if success:
             try:
                 items = extract_items_with_amount(ocr_text)
                 if items:
-                    display = "\n".join([f"- {name.strip()} : {price}원" for name, price in items])
+                    dialog = QDialog(self)
+                    dialog.setWindowTitle("OCR 품목 인식 결과")
+                    dialog.resize(420, 400)
+                    table = QTableWidget()
+                    table.setColumnCount(2)
+                    table.setHorizontalHeaderLabels(["품목명", "금액"])
+                    table.setRowCount(len(items))
+                    for row, (name, price) in enumerate(items):
+                        table.setItem(row, 0, QTableWidgetItem(name))
+                        table.setItem(row, 1, QTableWidgetItem(f"{price} 원"))
+                    layout = QVBoxLayout2()
+                    layout.addWidget(table)
+                    dialog.setLayout(layout)
+                    dialog.exec_()
+                    self.edu_status.setText("✅")
                 else:
-                    display = "📭 인식된 품목이 없습니다."
-                QMessageBox.information(self, "OCR 결과", display)
-                self.edu_status.setText("✅")
+                    QMessageBox.information(self, "OCR 결과", "📭 인식된 품목이 없습니다.")
+                    self.edu_status.setText("❌")
             except Exception as e:
                 QMessageBox.critical(self, "후처리 오류", str(e))
                 self.edu_status.setText("❌")
