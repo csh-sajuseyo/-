@@ -1,31 +1,36 @@
 
 import re
 
-def extract_items_with_amount(ocr_text: str):
+# OCR 결과에서 품목 제목 + 금액만 추출
+def parse_ocr_text(ocr_text):
+    results = []
     lines = ocr_text.splitlines()
-    items = []
-    buffer = ""
-    
-    for i, line in enumerate(lines):
-        line = line.strip()
-        if not line:
+    for line in lines:
+        if not line.strip():
             continue
 
-        # 금액 패턴이 있는 줄이면
-        if re.search(r"[\d,]{3,}\s*원|\d{3,}", line):
-            # 금액 추출
-            amount_match = re.search(r"([\d,]{3,})\s*원?|\d{3,}", line)
-            amount = amount_match.group(1).replace(",", "") if amount_match else None
-            
-            # 앞줄 또는 앞앞줄에서 품목 추정
-            candidate_lines = lines[max(0, i - 2):i]
-            candidate_lines = [l.strip() for l in candidate_lines if l.strip()]
-            item_name = candidate_lines[-1] if candidate_lines else "품목없음"
+        match = re.findall(r"(\d[\d,\.]{2,})", line)
+        if match:
+            raw_price = match[-1]
+            price = raw_price.replace(",", "").replace(".", "")
+            price_str = f"{int(price):,} 원"
+            item = line.replace(raw_price, "").strip()
+        else:
+            price_str = "금액없음"
+            item = line.strip()
 
-            # 전처리
-            item_name = re.sub(r"[^가-힣A-Za-z0-9\s]", "", item_name)
-            amount = amount.strip() + " 원" if amount else "금액없음"
+        # ✨ 캡처1, 캡처2 등 제거
+        item = re.sub(r"\[?캡처\d+\]?", "", item)
 
-            items.append((item_name, amount))
+        # ✨ 앞쪽 특수기호 제거 보강
+        item = re.sub(r"^[\|\)\:\;\.ㅣ\'\"]+", "", item)
+        item = re.sub(r"^\s+", "", item)
 
-    return items
+        # ✨ 마지막 사람 이름 제거 (2~3글자 한글)
+        item = re.sub(r"\s[가-힣]{2,3}$", "", item)
+
+        results.append((item, price_str))
+    return results
+
+# ✅ 사줄게요.py 내부 연동용 별칭
+extract_items_with_amount = parse_ocr_text
