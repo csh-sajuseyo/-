@@ -16,6 +16,47 @@ from edu_ocr_reader import capture_and_extract_text
 from ocr_text_parser import extract_items_with_amount
 
 class SajulgeyoApp(QWidget):
+
+    def run_edu_ocr(self):
+        try:
+            from edu_ocr_reader import capture_and_extract_text
+            from ocr_text_parser import extract_items_with_amount
+
+            success, ocr_text = capture_and_extract_text()
+            if not success or not ocr_text:
+                QMessageBox.warning(self, "OCR 실패", "텍스트를 추출하지 못했습니다.")
+                self.edu_status.setText("❌")
+                return
+
+            items = extract_items_with_amount(ocr_text)
+            if not items:
+                QMessageBox.information(self, "OCR 결과", "📭 인식된 품목이 없습니다.")
+                self.edu_status.setText("❌")
+                return
+
+            dialog = QDialog(self)
+            dialog.setWindowTitle("OCR 품목 인식 결과")
+            dialog.resize(480, 400)
+            table = QTableWidget()
+            table.setColumnCount(2)
+            table.setHorizontalHeaderLabels(["품의명", "금액"])
+            table.setRowCount(len(items))
+
+            for row, (name, price) in enumerate(items):
+                table.setItem(row, 0, QTableWidgetItem(name))
+                table.setItem(row, 1, QTableWidgetItem(f"{price} 원"))
+
+            layout = QVBoxLayout2()
+            layout.addWidget(table)
+            dialog.setLayout(layout)
+            dialog.exec_()
+            self.edu_status.setText("✅")
+
+        except Exception as e:
+            QMessageBox.critical(self, "전체 실행 오류", str(e))
+            self.edu_status.setText("❌")
+
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("사줄게요 v1.0")
