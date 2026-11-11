@@ -24,6 +24,21 @@ If one source fails, the others are still collected. The failure is written to `
 - Fields: `coins`, `event_type` (hack / withdrawal_halt / listing / delisting / regulation / macro / other), `direction` (bullish / bearish / neutral), `importance` 1–5, `summary_ko`
 - **Daily cost cap**: `NEWS_FEED_DAILY_USD_CAP` (default $1.00, the day resets at 00:00 KST). Before each call it checks whether a worst-case call (max_tokens fully used) would push past the cap. If it would, it stops the call, so the actual spend never exceeds the cap. After the cap is hit, items are still collected and stored with `classified=false`. The ledger is `data/cost_ledger.json`.
 
+## Extract into a standalone repo (Windows, one time)
+This folder currently lives on the `claude/wonderful-hawking-86v0bn` branch of **`csh-sajuseyo/-`**. Not in coin-auto-trader.
+```powershell
+powershell -ExecutionPolicy Bypass -File EXTRACT_STANDALONE.ps1   # -> C:\CodexProjects\news-feed (git init, venv, empty .env)
+```
+It does not merge or modify any branch on the source repo.
+
+## Background run with the window hidden
+```bat
+START_HIDDEN.cmd   &rem pythonw, no console window; log: data\collector.log, PID: data\collector.pid
+STOP_HIDDEN.cmd
+REPORT_NEWS_FEED.cmd
+```
+If `.env` has no `ANTHROPIC_API_KEY`, AI classification is skipped and it only collects (`classified=false`).
+
 ## Setup (Windows)
 ```bat
 cd C:\CodexProjects\news-feed

@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 from collections import Counter
 
 from news_feed.budget import DailyBudget
@@ -39,15 +40,26 @@ def main() -> None:
     ap.add_argument("--backfill-hours", type=float, default=24.0,
                     help="ignore items published longer ago than this (first run)")
     ap.add_argument("--report", action="store_true")
+    ap.add_argument("--log-file", help="write logs here (needed under pythonw, which has no console)")
     args = ap.parse_args()
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    fmt = "%(asctime)s %(levelname)s %(message)s"
+    if args.log_file:
+        logging.basicConfig(level=logging.INFO, format=fmt, filename=args.log_file, encoding="utf-8")
+    else:
+        logging.basicConfig(level=logging.INFO, format=fmt)
     if args.report:
         return report()
     c = Collector(load_config(), backfill_hours=args.backfill_hours)
     if args.once:
         print(json.dumps(c.run_once(), ensure_ascii=False, indent=2))
     else:
-        c.run_forever(args.duration)
+        pid_file = DATA / "collector.pid"
+        DATA.mkdir(parents=True, exist_ok=True)
+        pid_file.write_text(str(os.getpid()), encoding="ascii")
+        try:
+            c.run_forever(args.duration)
+        finally:
+            pid_file.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
