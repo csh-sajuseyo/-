@@ -99,8 +99,8 @@ SCHEMA = {
     "additionalProperties": False,
 }
 
-BATCH_SIZE = 15
-MAX_TOKENS = 4096  # 15 items x ~170 output tokens (3 Korean sentences each) + JSON overhead
+BATCH_SIZE = 8  # 3 Korean sentences per item: 15 items could hit max_tokens and lose the whole batch
+MAX_TOKENS = 4096  # 8 items x ~250 output tokens + JSON overhead, with room to spare
 # rough input estimate for the budget pre-check: system prompt + per-item text (title + short summary)
 _EST_FIXED_TOKENS = 1100
 _EST_TOKENS_PER_ITEM = 130
@@ -150,16 +150,23 @@ class Classifier:
         return out, cost
 
     def classify(self, items: list[RawItem]) -> tuple[dict[str, dict[str, Any]], float, str | None]:
-        """Returns (results by item id, cost this call, stop reason or None)."""
+        """Returns (results by item id, cost this call, stop reason or None).
+
+        A failed batch (API error, truncated output) is skipped and the next batch still runs;
+        only the budget stops everything. Unclassified items are retried later by the collector.
+        """
         results: dict[str, dict[str, Any]] = {}
         total = 0.0
+        errors: list[str] = []
         for i in range(0, len(items), BATCH_SIZE):
             try:
                 got, cost = self._request(items[i:i + BATCH_SIZE])
             except BudgetExceeded as exc:
-                return results, total, str(exc)
-            except (anthropic.APIError, RuntimeError, ValueError, KeyError) as exc:
-                return results, total, f"{type(exc).__name__}: {str(exc)[:200]}"
+                errors.append(str(exc))
+                break
+            except (anthropic.APIError, RuntimeError, ValueError, KeyError, StopIteration) as exc:
+                errors.append(f"{type(exc).__name__}: {str(exc)[:160]}")
+                continue
             results.update(got)
             total += cost
-        return results, total, None
+        return results, total, ("; ".join(errors)[:400] or None)

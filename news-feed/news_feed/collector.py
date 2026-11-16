@@ -13,12 +13,13 @@ from pathlib import Path
 
 from dotenv import dotenv_values
 
-from .brief import RESERVE_PER_BRIEF, Briefer, read_tail, slot_due
+from .brief import RESERVE_PER_BRIEF, Briefer, slot_due
 from .budget import KST, DailyBudget
 from .classifier import Classifier, rule_tag
 from .feed import write_feed
 from .macro import atomic_write_json, fetch_calendar, fetch_markets
 from .sources import Fetcher, RawItem
+from .store import append_labels, load_events
 
 log = logging.getLogger("news_feed")
 ROOT = Path(__file__).resolve().parent.parent
@@ -27,6 +28,8 @@ DATA = ROOT / "data"
 MARKETS_EVERY = 900
 CALENDAR_EVERY = 6 * 3600
 BRIEF_RETRY_EVERY = 900
+RELABEL_PER_POLL = 24      # unclassified items retried per poll
+RELABEL_WINDOW_H = 36      # only items newer than this
 
 
 def load_config(env_path: Path = ROOT / ".env") -> dict:
@@ -92,6 +95,7 @@ class Collector:
         self._next_markets = 0.0
         self._next_calendar = 0.0
         self._brief_tries: dict[str, list[float]] = {}
+        self._relabel_tried: set[str] = set()
         if self.classifier is None:
             log.warning("ANTHROPIC_API_KEY missing in .env — collecting without AI classification or briefings")
 
@@ -113,11 +117,11 @@ class Collector:
         if not (force or time.monotonic() >= self._next_markets):
             return {}
         self._next_markets = time.monotonic() + MARKETS_EVERY
-        hist = read_tail(self.data_dir / "markets_history.jsonl", 200)
         now = datetime.now(timezone.utc)
-        items, status = fetch_markets(self.fetcher, hist, now)
+        items, status = fetch_markets(self.fetcher)
         if items:
-            self.markets = {**self.markets, **items}  # keep last good value of an indicator that failed now
+            # keep the last good value of an indicator that failed now; drop keys we no longer publish
+            self.markets = {k: v for k, v in {**self.markets, **items}.items() if k in status}
             atomic_write_json(self.data_dir / "markets.json",
                               {"updated_at": now.isoformat(timespec="seconds"), "items": self.markets})
             with (self.data_dir / "markets_history.jsonl").open("a", encoding="utf-8") as fh:
@@ -137,6 +141,31 @@ class Collector:
                                "events": events})
         return {f"cal:{k}": v for k, v in status.items()}
 
+    def relabel(self, now: datetime) -> str | None:
+        """Retry AI labels for recent items that were stored unclassified (written to labels.jsonl)."""
+        if self.classifier is None:
+            return None
+        since = (now - timedelta(hours=RELABEL_WINDOW_H)).isoformat()
+        todo = [r for r in load_events(self.data_dir, 3000)
+                if not r.get("classified") and r.get("id") not in self._relabel_tried
+                and (r.get("published_at") or r.get("collected_at") or "") >= since]
+        todo = todo[-RELABEL_PER_POLL:]
+        if not todo:
+            return None
+        items = [RawItem(source=r.get("source") or "", kind=r.get("source_kind") or "rss", title=r.get("title") or "",
+                         url=r.get("url") or "", published_at=r.get("published_at"),
+                         category=r.get("source_category"), group=r.get("group") or "crypto",
+                         summary=r.get("summary") or "") for r in todo]
+        by_new_id = {it.id: r["id"] for it, r in zip(items, todo)}
+        self.classifier.reserve = self._reserve(now)
+        ai, cost, stop = self.classifier.classify(items)
+        if stop and "daily cap" in stop:
+            return f"stopped: {stop[:120]}"  # budget: try these again later
+        self._relabel_tried.update(r["id"] for r in todo)
+        labels = {by_new_id.get(k, k): v for k, v in ai.items()}
+        append_labels(self.data_dir, labels, self.cfg["model"], now.isoformat(timespec="seconds"))
+        return f"{len(labels)}/{len(todo)} ${cost:.4f}" + (f" ({stop[:80]})" if stop else "")
+
     def maybe_brief(self, now: datetime, force_slot: str | None = None) -> str | None:
         if self.briefer is None:
             return None
@@ -148,7 +177,7 @@ class Collector:
             return None
         tries.append(time.monotonic())
         try:
-            events = read_tail(self.events_path, 3000)
+            events = load_events(self.data_dir, 3000)
             rec = self.briefer.make(events, self.markets, self.calendar, slot, now)
             return f"ok:{slot} ${rec['cost_usd']:.4f}"
         except Exception as exc:
@@ -208,6 +237,10 @@ class Collector:
                 fh.write(json.dumps(row, ensure_ascii=False) + "\n")
         self.seen.save()
 
+        try:
+            relabel = self.relabel(now)
+        except Exception as exc:
+            relabel = f"error:{type(exc).__name__}"
         brief = self.maybe_brief(now)
         self.status = {**self.status, **status, **slow}
         try:
@@ -219,7 +252,7 @@ class Collector:
             "at": now.isoformat(timespec="seconds"), "sources": status, "slow": slow or None,
             "new": len(uniq), "skipped_old": skipped_old, "classified": len(ai), "cost_usd": round(cost, 6),
             "spent_today_usd": round(self.budget.spent(), 6), "classify_stopped": stop,
-            "brief": brief, "feed": feed,
+            "relabel": relabel, "brief": brief, "feed": feed,
         }
         with (self.data_dir / "run_log.jsonl").open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(summary, ensure_ascii=False) + "\n")

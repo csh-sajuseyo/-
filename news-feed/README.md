@@ -84,4 +84,5 @@ On the first run, only items published within the last 24 hours are stored (`--b
 - `seen_ids.json` — dedup state
 - `briefs.jsonl` — world-economy briefings (append-only)
 - `feed.json` — read-only summary for the News tab (atomic write) — `docs/FEED-FORMAT.md`
-- `markets.json`, `markets_history.jsonl`, `calendar.json` — latest indicators, indicator snapshots, calendar
+- `labels.jsonl` — AI labels added later for items stored unclassified (merged on read)
+- `markets.json`, `markets_history.jsonl`, `calendar.json` — latest indicators (BTC/XLM, FRED, ECB), indicator snapshots, calendar

@@ -56,6 +56,19 @@ if (-not $found) { $lines = @($lines) + "NEWS_FEED_DAILY_USD_CAP=2.00" }
 [IO.File]::WriteAllLines((Join-Path $here ".env"), [string[]]$lines, (New-Object Text.UTF8Encoding($false)))
 Write-Host "daily cap set to `$2.00 in .env"
 
+# BLS (US CPI / jobs schedule) refuses anonymous scripts: it wants a contact e-mail in the request.
+# Asked once; stored only in .env (git-ignored). Press Enter to skip.
+$lines = [IO.File]::ReadAllLines((Join-Path $here ".env"))
+$hasContact = @($lines | Where-Object { $_ -match '^\s*NEWS_FEED_CONTACT\s*=\s*\S' }).Count -gt 0
+if (-not $hasContact) {
+    $c = Read-Host "Contact e-mail for BLS (saved only in .env; press Enter to skip)"
+    if ($c -and $c -match '^[^@\s]+@[^@\s]+\.[^@\s]+$') {
+        $lines = @($lines | Where-Object { $_ -notmatch '^\s*#?\s*NEWS_FEED_CONTACT\s*=' }) + "NEWS_FEED_CONTACT=$c"
+        [IO.File]::WriteAllLines((Join-Path $here ".env"), [string[]]$lines, (New-Object Text.UTF8Encoding($false)))
+        Write-Host "NEWS_FEED_CONTACT saved in .env"
+    } else { Write-Host "skipped (BLS schedule stays blocked)" }
+}
+
 # 4. commit, check, start
 Commit-All "World-economy sources, macro classification, briefings, feed.json"
 & .\.venv\Scripts\python.exe -m pytest -q tests

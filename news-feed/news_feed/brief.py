@@ -11,7 +11,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -19,7 +18,8 @@ from typing import Any
 import anthropic
 
 from .budget import KST, PRICES, DailyBudget
-from .macro import upcoming
+from .macro import later, upcoming
+from .store import read_tail
 
 log = logging.getLogger("news_feed.brief")
 
@@ -32,8 +32,10 @@ COINS = ("BTC", "XLM")
 RESERVE_PER_BRIEF = 0.12
 
 SYSTEM = """You write a short world-economy briefing in Korean for a retail crypto trader (BTC, XLM holder).
-You receive JSON with: news (last 12 hours, ref N*), markets (latest indicator values, ref M:*),
-calendar (scheduled releases and meetings in the next 7 days, ref C*).
+You receive JSON with: news (last 12 hours, ref N*), markets (ref M:*: BTC and XLM live price with 24h change
+from Binance, plus official daily economic series; each has its real name and the date it refers to),
+calendar (scheduled releases and meetings in the next 7 days, ref C*) and calendar_later (the next ones after
+that, ref L*).
 
 Rules:
 - Use only facts and numbers that appear in the input. Never add a number, date, price or percentage that is not in the input.
@@ -43,8 +45,11 @@ Rules:
 - situation: exactly 3 lines, each <= 70 Korean characters: (1) rates/inflation/dollar, (2) stocks/risk appetite/geopolitics,
   (3) crypto market. If the news for a line is thin, say so briefly.
 - risks: 2-4 concrete risk factors visible in the material.
+- Name market values exactly as their `name` says, with their date (e.g. "나스닥 종합지수(11/14 종가)").
+  Never call them futures or DXY. Daily series are one or more days old: do not describe them as today's move.
 - next_7d: the scheduled items from the calendar input that matter most (max 6), in date order, with what to watch.
-  Use the calendar's date_kst and time_kst exactly.
+  Use the calendar's date_kst and time_kst exactly. If calendar is empty, return an empty list.
+- later: up to 3 items from calendar_later (only when they matter), same format. Empty list if none.
 - coin_impact: for BTC and XLM, direction (bullish/bearish/neutral/mixed) and one sentence on the channel of effect.
   XLM: say plainly when there is no XLM-specific news and the view follows BTC/risk appetite.
 - confidence: low/medium/high and one sentence why (amount and agreement of evidence)."""
@@ -64,6 +69,11 @@ SCHEMA = {
             "properties": {"date_kst": {"type": "string"}, "time_kst": {"type": "string"},
                            "text": {"type": "string"}, "refs": _REF},
             "required": ["date_kst", "time_kst", "text", "refs"], "additionalProperties": False}},
+        "later": {"type": "array", "items": {
+            "type": "object",
+            "properties": {"date_kst": {"type": "string"}, "time_kst": {"type": "string"},
+                           "text": {"type": "string"}, "refs": _REF},
+            "required": ["date_kst", "time_kst", "text", "refs"], "additionalProperties": False}},
         "coin_impact": {"type": "array", "items": {
             "type": "object",
             "properties": {"coin": {"type": "string", "enum": list(COINS)},
@@ -75,26 +85,9 @@ SCHEMA = {
                                       "reason": {"type": "string"}},
                        "required": ["level", "reason"], "additionalProperties": False},
     },
-    "required": ["situation", "risks", "next_7d", "coin_impact", "confidence"],
+    "required": ["situation", "risks", "next_7d", "later", "coin_impact", "confidence"],
     "additionalProperties": False,
 }
-
-
-def read_tail(path: Path, n: int) -> list[dict]:
-    if not path.exists():
-        return []
-    rows: deque = deque(maxlen=n)
-    with path.open(encoding="utf-8") as fh:
-        for line in fh:
-            if line.strip():
-                rows.append(line)
-    out = []
-    for line in rows:
-        try:
-            out.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-    return out
 
 
 def _when(row: dict) -> datetime | None:
@@ -133,18 +126,21 @@ def build_inputs(events: list[dict], markets: dict[str, Any], calendar: list[dic
     mk = []
     for key, m in (markets or {}).items():
         ref = f"M:{key}"
-        refs[ref] = {"title": f"{m.get('label')} ({m.get('source')})", "url": m.get("url"), "source": m.get("source")}
-        mk.append({"ref": ref, "name": m.get("label"), "value": m.get("value"), "unit": m.get("unit"),
-                   "change_pct": m.get("change_pct"), "change_bp": m.get("change_bp"),
-                   "change_basis": m.get("change_basis"), "as_of": m.get("as_of"), "basis": m.get("basis")})
-    cal = []
-    for i, c in enumerate(upcoming(calendar or [], now, 7), 1):
-        ref = f"C{i}"
-        refs[ref] = {"title": c["name_ko"], "url": c["url"], "source": c["source"]}
-        cal.append({"ref": ref, "date_kst": c["date_kst"], "time_kst": c["time_kst"], "name": c["name_ko"],
-                    "importance": c["importance"], "source": c["source"]})
+        refs[ref] = {"title": m.get("name_ko") or m.get("label"), "url": m.get("url"), "source": m.get("source")}
+        mk.append({k: v for k, v in {
+            "ref": ref, "name": m.get("label"), "value": m.get("value"), "unit": m.get("unit"),
+            "change_pct": m.get("change_pct"), "change_pp": m.get("change_pp"),
+            "change_basis": m.get("change_basis"), "as_of": m.get("as_of"), "source": m.get("source"),
+        }.items() if v is not None})
+    cal, lat = [], []
+    for prefix, rows, dest in (("C", upcoming(calendar or [], now, 7), cal), ("L", later(calendar or [], now), lat)):
+        for i, c in enumerate(rows, 1):
+            ref = f"{prefix}{i}"
+            refs[ref] = {"title": c["name_ko"], "url": c["url"], "source": c["source"]}
+            dest.append({"ref": ref, "date_kst": c["date_kst"], "time_kst": c["time_kst"], "name": c["name_ko"],
+                         "importance": c["importance"], "source": c["source"]})
     return {"now_kst": now.astimezone(KST).strftime("%Y-%m-%d %H:%M"), "window_hours": WINDOW_HOURS,
-            "news": news, "markets": mk, "calendar": cal}, refs
+            "news": news, "markets": mk, "calendar": cal, "calendar_later": lat}, refs
 
 
 _NUM = re.compile(r"\d[\d,]*(?:\.\d+)?")
@@ -155,8 +151,9 @@ def unverified_numbers(brief: dict, input_text: str) -> list[str]:
     hay = input_text.replace(",", "")
     allowed = {"1", "2", "3", "7", "12", "24"}  # window sizes / ordinals stated in the prompt
     bad = []
-    texts = [x["text"] for k in ("situation", "risks", "next_7d", "coin_impact") for x in brief.get(k, [])]
-    texts += [x.get("date_kst", "") + " " + x.get("time_kst", "") for x in brief.get("next_7d", [])]
+    texts = [x["text"] for k in ("situation", "risks", "next_7d", "later", "coin_impact") for x in brief.get(k, [])]
+    texts += [x.get("date_kst", "") + " " + x.get("time_kst", "") for k in ("next_7d", "later")
+              for x in brief.get(k, [])]
     texts.append(brief.get("confidence", {}).get("reason", ""))
     for t in texts:
         for m in _NUM.findall(t):
@@ -220,7 +217,7 @@ class Briefer:
             raise RuntimeError(f"stop_reason={resp.stop_reason}")
         out = json.loads(next(b.text for b in resp.content if b.type == "text"))
         out["situation"] = out["situation"][:3]
-        used = sorted({r for k in ("situation", "risks", "next_7d", "coin_impact") for x in out[k]
+        used = sorted({r for k in ("situation", "risks", "next_7d", "later", "coin_impact") for x in out.get(k, [])
                        for r in x["refs"] if r in refs}, key=lambda r: (r[0], r))
         rec = {
             "id": f"brief-{slot.replace(' ', 'T')}",
@@ -232,7 +229,7 @@ class Briefer:
             "sources": [{"ref": r, **refs[r]} for r in used],
             "unverified_numbers": unverified_numbers(out, text),
             "inputs": {"news": len(payload["news"]), "markets": len(payload["markets"]),
-                       "calendar": len(payload["calendar"])},
+                       "calendar": len(payload["calendar"]), "calendar_later": len(payload["calendar_later"])},
             "cost_usd": round(cost, 6),
         }
         self.path.parent.mkdir(parents=True, exist_ok=True)

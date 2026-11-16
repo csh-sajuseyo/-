@@ -17,10 +17,10 @@ import sys
 from collections import Counter
 from datetime import datetime, timezone
 
-from news_feed.brief import read_tail
+from news_feed.store import load_events, read_tail
 from news_feed.budget import KST, DailyBudget
 from news_feed.collector import DATA, Collector, load_config
-from news_feed.macro import fetch_calendar, fetch_markets, market_line
+from news_feed.macro import calendar_summary, fetch_calendar, fetch_markets, market_line
 from news_feed.sources import Fetcher
 
 
@@ -33,7 +33,7 @@ def _kst(iso: str | None) -> str:
 
 def report(since: str | None = None) -> None:
     cfg = load_config()
-    rows = read_tail(DATA / "news_events.jsonl", 10**7)
+    rows = load_events(DATA, 10**7)
     done = [r for r in rows if r.get("classified")]
     if since:
         done = [r for r in done if (r.get("collected_at") or "") >= since]
@@ -56,6 +56,11 @@ def report(since: str | None = None) -> None:
     b = read_tail(DATA / "briefs.jsonl", 1)
     if b:
         print(f"최근 브리핑: {b[-1]['slot']} (모델 {b[-1]['model']}, ${b[-1]['cost_usd']:.4f})")
+    stops = Counter((r.get("classify_stopped") or "")[:60] for r in read_tail(DATA / "run_log.jsonl", 2000)
+                    if r.get("classify_stopped"))
+    if stops:
+        print("분류가 멈춘 이유(최근 수집 기록):", dict(stops.most_common(5)))
+    print(f"아직 분류 전: {sum(1 for r in rows if not r.get('classified'))}건 (최근 36시간 것은 수집기가 다시 분류함)")
     logs = read_tail(DATA / "run_log.jsonl", 1)
     if logs:
         bad = {k: v for k, v in logs[-1]["sources"].items() if not str(v).startswith("ok")}
@@ -67,7 +72,7 @@ def check_sources() -> int:
     f = Fetcher(contact=cfg["contact"])
     _, status = f.collect()
     markets, mstat = fetch_markets(f)
-    _, cstat = fetch_calendar(f)
+    cal, cstat = fetch_calendar(f)
     bad = 0
     for title, st in (("뉴스·공지", status), ("시장 지표", mstat), ("경제 일정", cstat)):
         print(f"[{title}]")
@@ -75,6 +80,11 @@ def check_sources() -> int:
             ok = str(v).startswith(("ok", "fallback"))
             bad += not ok
             print(f"  {'OK ' if ok else '실패'} {k:16s} {v}")
+    print("[경제 일정 — 소스별 앞으로 일정]")
+    for k, v in calendar_summary(cal, datetime.now(timezone.utc)).items():
+        print(f"     {k:16s} {v}")
+    if str(cstat.get("BLS-schedule", "")).startswith("error") and not cfg["contact"]:
+        print("  ※ BLS가 막혔고 .env에 NEWS_FEED_CONTACT(연락처 이메일)가 없습니다. 넣으면 BLS 일정이 열립니다.")
     print("지표 한 줄:", market_line(markets) or "(없음)")
     print(f"실패 {bad}개" if bad else "모두 OK")
     return 1 if bad else 0

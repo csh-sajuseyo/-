@@ -74,8 +74,8 @@ def test_collector_classifies_dedups_and_clamps(tmp_path):
     col = Collector(cfg, data_dir=tmp_path, fetcher=FakeFetcher(its + its[:3]),
                     classifier=make_classifier(budget, fake), macro=False)
     s = col.run_once()
-    assert s["new"] == 20 and s["classified"] == 20 and fake.calls == 2  # batches of 15
-    rows = [json.loads(l) for l in (tmp_path / "news_events.jsonl").read_text().splitlines()]
+    assert s["new"] == 20 and s["classified"] == 20 and fake.calls == 3  # batches of 8
+    rows = [json.loads(l) for l in (tmp_path / "news_events.jsonl").read_text(encoding="utf-8").splitlines()]
     assert len(rows) == 20 and rows[0]["importance"] == 5 and rows[0]["coins"] == ["BTC"]
     assert col.run_once()["new"] == 0  # seen ids persist
 
@@ -90,7 +90,7 @@ def test_budget_cap_stops_classification(tmp_path):
     s = col.run_once()
     # worst-case pre-check (2048 max output tokens ≈ $0.001) already exceeds the cap -> no call
     assert fake.calls == 0 and s["classified"] == 0 and "daily cap" in s["classify_stopped"]
-    rows = [json.loads(l) for l in (tmp_path / "news_events.jsonl").read_text().splitlines()]
+    rows = [json.loads(l) for l in (tmp_path / "news_events.jsonl").read_text(encoding="utf-8").splitlines()]
     assert len(rows) == 5 and not any(r["classified"] for r in rows)  # still collected
 
 
@@ -105,6 +105,6 @@ def test_budget_never_exceeded_over_many_calls(tmp_path):
 
 def test_key_only_from_dotenv(tmp_path, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "from-shell")
-    (tmp_path / ".env").write_text("NEWS_FEED_DAILY_USD_CAP=0.5\n")
+    (tmp_path / ".env").write_text("NEWS_FEED_DAILY_USD_CAP=0.5\n", encoding="utf-8")
     cfg = load_config(tmp_path / ".env")
     assert cfg["api_key"] == "" and cfg["cap"] == 0.5

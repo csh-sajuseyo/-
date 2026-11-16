@@ -14,7 +14,7 @@ independently; one failing never stops the others (`run.py --check-sources` show
 | **ECB** | `ecb.europa.eu/rss/press.html` | official press RSS; ECB allows reuse with source attribution |
 | **BOJ** | `boj.or.jp/en/rss/whatsnew.xml` | official "What's new" RSS (RSS 1.0); reuse allowed with source |
 | **BOK** | `bok.or.kr/portal/bbs/B0000338/news.rss?menuNo=200761` | 한국은행 보도자료 RSS (official) |
-| **BLS** | `bls.gov/feed/bls_latest.rss` | official release RSS (CPI, jobs, PPI…); public domain. BLS blocks anonymous bots: if it returns 403, set `NEWS_FEED_CONTACT` in `.env` |
+| **BLS** | `bls.gov/feed/bls_latest.rss` | official release RSS (CPI, jobs, PPI…); public domain. BLS asks scripts to identify themselves: with `NEWS_FEED_CONTACT` in `.env`, requests to bls.gov carry it in `User-Agent` and `From` (no other site gets it) |
 | **BEA** | `apps.bea.gov/rss/rss.xml` | official release RSS (GDP, PCE); public domain |
 | **Yonhap 경제** | `yna.co.kr/rss/economy.xml` | 국문. 연합뉴스가 공개 RSS로 제공; headline + link only, personal use, always link back |
 | **CNBC Economy** | `cnbc.com/id/20910258/device/rss/rss.html` | public RSS; headline + link, personal non-commercial use |
@@ -34,19 +34,24 @@ We store only the headline, a short description (≤ 240 chars) and the link —
 
 ## Market indicators (every 15 minutes)
 
-| indicator | primary (Stooq) | fallback (FRED, official daily) |
-|---|---|---|
-| 달러지수 | `dx.f` (DXY futures) | `DTWEXBGS` broad dollar index — **different index**, marked in `basis` |
-| 미 국채 10년 | `10usy.b` | `DGS10` |
-| S&P500 선물 | `es.f` | `SP500` (cash index, previous close) |
-| 나스닥 선물 | `nq.f` | `NASDAQCOM` (composite, previous close) |
-| 금 | `gc.f` | — (FRED has no free gold series) |
-| WTI | `cl.f` | `DCOILWTICO` |
-| 원/달러 | `usdkrw` | `DEXKOUS` |
+| key | shown as | source | freshness |
+|---|---|---|---|
+| `btc`, `xlm` | BTC / XLM 현재가(바이낸스, USDT), 24시간 변화 | Binance public market-data API `/api/v3/ticker/24hr` (no key); hosts tried in order: api.binance.com → data-api.binance.vision → www.binance.com | live |
+| `usdkrw` | 원/달러 환율(ECB 기준환율 환산) | ECB euro reference rates XML (`eurofxref-hist-90d.xml`): KRW per USD = (KRW per EUR) ÷ (USD per EUR) | same day, ~16:00 CET |
+| ↳ fallback | 원/달러 환율(연준 H.10) | FRED `DEXKOUS` | weekly update |
+| `usd_broad` | 달러(무역가중 광의지수) | FRED `DTWEXBGS` | weekly update, daily values |
+| `us10y` | 미 국채 10년 금리 | FRED `DGS10` | 1 business day late |
+| `sp500` | S&P500 지수 (종가) | FRED `SP500` | 1 business day late |
+| `nasdaq` | 나스닥 종합지수 (종가) | FRED `NASDAQCOM` | 1 business day late |
+| `wti` | WTI 유가(현물) | FRED `DCOILWTICO` | several days late (EIA weekly) |
 
-Why: **Stooq** gives delayed quotes, futures included, as a plain CSV with no key; it is the only
-key-less source with futures that does not forbid automated download in its terms (personal use).
-It is an unofficial site, so every value also has an official fallback where one exists:
-**FRED** (Federal Reserve Bank of St. Louis) — official, very stable, key-less CSV, but daily and a day late.
-Not used: Yahoo Finance (terms forbid automated access), Investing.com (forbids scraping),
-paid/keyed APIs (Alpha Vantage, Twelve Data…).
+Why:
+- On the first real run (PC, 2026-11-16) Stooq was blocked, so every value came from FRED while the screen still
+  called them 「선물」「달러지수」. Now each value carries its **real** name and the date it refers to, and Stooq is removed.
+- No free source that allows automated download gives live index futures, DXY or gold
+  (Yahoo Finance and Investing.com forbid it; CME and ICE data are paid). So these are **not shown** rather than shown wrong.
+  FRED no longer carries a gold price (the LBMA series were withdrawn), so **gold was removed**.
+- **Binance** public market data needs no key and the API is meant for programs; BTC/XLM are what the user holds.
+- **ECB** reference rates are official, published as a machine-readable XML for reuse with attribution, and arrive the
+  same day (FRED's KRW series is updated weekly). ECB's site was already reachable from the PC.
+- **FRED** (Federal Reserve Bank of St. Louis): official, very stable, key-less CSV download intended for reuse.

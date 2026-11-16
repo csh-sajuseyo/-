@@ -79,31 +79,70 @@ def test_fomc_page_parse():
 
 
 class FakeResp:
-    def __init__(self, text):
+    def __init__(self, text="", data=None):
         self.text = text
+        self.content = text.encode("utf-8")
+        self._data = data
+
+    def json(self):
+        return self._data
+
+
+ECB_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<gesmes:Envelope xmlns:gesmes="http://www.gesmes.org/xml/2002-08-01" xmlns="http://www.ecb.int/vocabulary/2002-08-01/eurofxref">
+<Cube><Cube time="2026-11-13"><Cube currency="USD" rate="1.1000"/><Cube currency="KRW" rate="1540.00"/></Cube>
+<Cube time="2026-11-12"><Cube currency="USD" rate="1.1000"/><Cube currency="KRW" rate="1529.00"/></Cube></Cube>
+</gesmes:Envelope>"""
+
+BINANCE_24H = [
+    {"symbol": "BTCUSDT", "lastPrice": "95120.50", "priceChangePercent": "-1.234", "closeTime": 1763251200000},
+    {"symbol": "XLMUSDT", "lastPrice": "0.2841", "priceChangePercent": "2.10", "closeTime": 1763251200000},
+]
 
 
 class FakeHttp:
-    """Stooq returns N/D for 'gc.f' and fails for 'dx.f'; FRED serves the fallback."""
-    def get(self, url, params=None, **kw):
-        if "stooq" in url:
-            s = params["s"]
-            if s == "dx.f":
-                raise IOError("blocked")
-            if s == "gc.f":
-                return FakeResp("Symbol,Date,Time,Open,High,Low,Close\nGC.F,N/D,N/D,N/D,N/D,N/D,N/D\n")
-            return FakeResp(f"Symbol,Date,Time,Open,High,Low,Close\n{s},2026-11-16,09:00:00,100,101,99,100.5\n")
+    """Binance main host fails (mirror answers), FRED serves daily series, ECB serves FX."""
+    def __init__(self, ecb_ok=True):
+        self.ecb_ok = ecb_ok
+        self.urls = []
+
+    def get(self, url, accept=None, params=None, **kw):
+        self.urls.append(url)
+        if "api.binance.com" in url:
+            raise IOError("blocked")
+        if "binance.vision" in url:
+            return FakeResp(data=BINANCE_24H)
+        if "ecb.europa.eu" in url:
+            if not self.ecb_ok:
+                raise IOError("down")
+            return FakeResp(ECB_XML)
         return FakeResp("observation_date,X\n2026-11-12,120.0\n2026-11-13,.\n2026-11-14,121.2\n")
 
+    def text(self, url, accept=None, **kw):
+        return self.get(url, accept, **kw).text
 
-def test_markets_fallbacks_and_line():
-    hist = [{"at": "2026-11-15T09:00:00+00:00", "values": {"us10y": 4.40}}]
-    m, st = fetch_markets(FakeHttp(), hist, datetime(2026, 11, 16, 9, tzinfo=timezone.utc))
-    assert st["dxy"] == "ok:FRED" and m["dxy"]["prev"] == 120.0 and m["dxy"]["change_pct"] == 1.0
-    assert st["gold"].startswith("error")  # no FRED fallback for gold
-    assert m["us10y"]["source"] == "Stooq"
+
+def test_markets_real_names_dates_and_crypto():
+    f = FakeHttp()
+    m, st = fetch_markets(f)
+    assert "gold" not in m and "gold" not in st  # no free gold series -> removed
+    assert st["btc"] == "ok:Binance" and m["btc"]["value"] == 95120.5 and m["btc"]["change_pct"] == -1.23
+    assert m["xlm"]["change_basis"] == "24시간 변화"
+    assert st["nasdaq"] == "ok:FRED" and m["nasdaq"]["label"] == "나스닥 종합지수(11/14 종가)"
+    assert m["usd_broad"]["label"] == "달러(무역가중 광의지수)(11/14 기준)"
+    assert m["us10y"]["change_pp"] == 1.2  # 120.0 -> 121.2 in this fake series
+    assert m["usdkrw"]["source"] == "ECB" and m["usdkrw"]["value"] == 1400.0 and m["usdkrw"]["prev"] == 1390.0
+    for v in m.values():  # never call these futures / DXY
+        assert "선물" not in v["label"] and "DXY" not in v["label"]
+    assert list(m)[:2] == ["btc", "xlm"]
     line = market_line(m)
-    assert "달러지수 121.2(+1.0%)" in line and "미 국채 10년" in line
+    assert line.startswith("BTC 95,120(-1.2%) · XLM 0.2841(+2.1%)")
+    assert "나스닥 121.2(+1.0%, 11/14)" in line and "원/달러 1,400.0(+0.7%, 11/13)" in line
+
+
+def test_markets_usdkrw_falls_back_to_fred():
+    m, st = fetch_markets(FakeHttp(ecb_ok=False))
+    assert st["usdkrw"] == "ok:FRED" and m["usdkrw"]["label"].startswith("원/달러 환율(연준 H.10)")
 
 
 def test_slot_due():
@@ -140,6 +179,7 @@ class FakeSonnet:
         out = {"situation": [{"text": "연준 금리 동결", "refs": ["N1"]}] * 4,
                "risks": [{"text": "물가", "refs": ["N1", "C1"]}],
                "next_7d": [{"date_kst": "2026-11-18", "time_kst": "22:30", "text": "CPI", "refs": ["C1"]}],
+               "later": [],
                "coin_impact": [{"coin": "BTC", "direction": "neutral", "text": "중립", "refs": ["M:dxy"]},
                                {"coin": "XLM", "direction": "neutral", "text": "BTC 따라감", "refs": ["N9"]}],
                "confidence": {"level": "medium", "reason": "근거 보통"}}
@@ -192,7 +232,7 @@ def test_feed_topics_and_atomic_write(tmp_path):
     assert topic_of(rows[3]) == "macro"  # old rows without 'group' still map by event_type
     f = build_feed(tmp_path, {}, [], {"Fed": "ok:1"}, datetime(2026, 11, 16, tzinfo=timezone.utc))
     assert [i["topic"] for i in f["items"]] == ["macro", "crypto", "exchange", "macro"]
-    assert f["items"][1]["my_coins"] == ["XLM"] and f["brief"] is None and f["version"] == 1
+    assert f["items"][1]["my_coins"] == ["XLM"] and f["brief"] is None and f["version"] == 2
 
 
 def test_classifier_reserve_keeps_room_for_briefs(tmp_path):

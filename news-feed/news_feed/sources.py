@@ -148,16 +148,37 @@ def parse_feed(xml_text: str | bytes, source: str, reliability: float, group: st
     return [r for r in rows if r.title]
 
 
+# Hosts that ask automated readers to identify themselves with a contact address
+# (bls.gov answers 403 to anonymous scripts). The contact comes from .env NEWS_FEED_CONTACT.
+CONTACT_HOSTS = ("bls.gov",)
+
+
 class Fetcher:
     def __init__(self, session: requests.Session | None = None, contact: str = "") -> None:
         self.session = session or requests.Session()
-        ua = USER_AGENT if not contact else f"news-feed/0.2 (personal research; {contact})"
-        self.session.headers.update({"User-Agent": ua})
+        self.contact = contact.strip()
+        self.session.headers.update({"User-Agent": USER_AGENT})
 
-    def get(self, url: str, **kw) -> requests.Response:
-        r = self.session.get(url, timeout=TIMEOUT, **kw)
+    def _headers(self, url: str, accept: str | None) -> dict[str, str]:
+        h: dict[str, str] = {}
+        if accept:
+            h["Accept"] = accept
+        if self.contact and any(host in url for host in CONTACT_HOSTS):
+            # BLS: "include contact information (e-mail) in the User-Agent"; From is the standard header for it
+            h["User-Agent"] = f"news-feed/0.3 (personal research; contact: {self.contact})"
+            h["From"] = self.contact
+            h.setdefault("Accept-Language", "en-US,en;q=0.8")
+        return h
+
+    def get(self, url: str, accept: str | None = None, **kw) -> requests.Response:
+        headers = {**self._headers(url, accept), **(kw.pop("headers", None) or {})}
+        r = self.session.get(url, timeout=TIMEOUT, headers=headers, **kw)
         r.raise_for_status()
         return r
+
+    def text(self, url: str, accept: str | None = None, **kw) -> str:
+        """Body as text, decoded as UTF-8 (servers often omit the charset; requests would guess Latin-1)."""
+        return self.get(url, accept, **kw).content.decode("utf-8", errors="replace")
 
     def rss(self, feed: Feed) -> list[RawItem]:
         r = self.get(feed.url)

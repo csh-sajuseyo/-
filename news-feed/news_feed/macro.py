@@ -1,11 +1,13 @@
 """Market indicators and the economic calendar (all key-less, official or feed-style sources).
 
-Markets
-  primary  : Stooq quote CSV  (https://stooq.com/q/l/) — free, no key, delayed quotes incl. futures
-  fallback : FRED graph CSV   (https://fred.stlouisfed.org/graph/fredgraph.csv) — St. Louis Fed, official, daily
-  Each value carries `source` and `basis`, because the FRED fallback is not always the same instrument
-  (e.g. broad dollar index instead of DXY, NASDAQ Composite instead of NQ futures).
-  Yahoo Finance and Investing.com are NOT used: their terms forbid automated access / scraping.
+Markets (why: docs/SOURCES.md)
+  BTC, XLM      : Binance public market-data API (no key) — live price and 24h change
+  원/달러        : ECB euro reference rates (official, same day ~16:00 CET), KRW per USD = KRW/EUR ÷ USD/EUR;
+                  fallback FRED DEXKOUS (Fed H.10)
+  달러·미10년·S&P500·나스닥·WTI : FRED graph CSV (St. Louis Fed, official, daily, 1+ day late)
+  Every value carries its real series name and the date it refers to. No futures, no DXY, no gold:
+  there is no free source that allows automated download for those (Stooq is blocked; Yahoo and
+  Investing.com forbid it; FRED no longer carries a gold price).
 
 Calendar
   BLS release schedule (official iCalendar)   — CPI, jobs report, PPI, JOLTS, ECI
@@ -19,6 +21,7 @@ import csv
 import io
 import json
 import re
+import xml.etree.ElementTree as ET
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -29,18 +32,20 @@ from .sources import Fetcher
 KST = timezone(timedelta(hours=9))
 ET_TZ = ZoneInfo("America/New_York")
 
-# key, Korean label, unit, stooq symbol, (fred series, basis of the fallback)
-INDICATORS: tuple[tuple[str, str, str, str | None, tuple[str, str] | None], ...] = (
-    ("dxy", "달러지수", "", "dx.f", ("DTWEXBGS", "FRED 광의 달러지수(DXY와 다른 지수)")),
-    ("us10y", "미 국채 10년", "%", "10usy.b", ("DGS10", "FRED 10년물 일별")),
-    ("spx_fut", "S&P500 선물", "", "es.f", ("SP500", "FRED S&P500 현물 일별 종가")),
-    ("ndx_fut", "나스닥 선물", "", "nq.f", ("NASDAQCOM", "FRED 나스닥 종합 일별 종가")),
-    ("gold", "금", "$", "gc.f", None),
-    ("wti", "WTI", "$", "cl.f", ("DCOILWTICO", "FRED WTI 현물 일별")),
-    ("usdkrw", "원/달러", "원", "usdkrw", ("DEXKOUS", "FRED 원/달러 일별(H.10)")),
-)
-STOOQ_URL = "https://stooq.com/q/l/"
 FRED_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv"
+ECB_HIST_URL = "https://www.ecb.europa.eu/stats/eurofxref/eurofxref-hist-90d.xml"
+BINANCE_HOSTS = ("https://api.binance.com", "https://data-api.binance.vision", "https://www.binance.com")
+
+# key, FRED series, real name (Korean), short name for the one-line strip, unit, what the date means
+FRED_SERIES: tuple[tuple[str, str, str, str, str, str], ...] = (
+    ("usd_broad", "DTWEXBGS", "달러(무역가중 광의지수)", "달러(무역가중)", "", "기준"),
+    ("us10y", "DGS10", "미 국채 10년 금리", "미10년", "%", "기준"),
+    ("sp500", "SP500", "S&P500 지수", "S&P500", "", "종가"),
+    ("nasdaq", "NASDAQCOM", "나스닥 종합지수", "나스닥", "", "종가"),
+    ("wti", "DCOILWTICO", "WTI 유가(현물)", "WTI", "$", "기준"),
+)
+CRYPTO = (("btc", "BTCUSDT", "BTC"), ("xlm", "XLMUSDT", "XLM"))
+ORDER = ("btc", "xlm", "usd_broad", "us10y", "sp500", "nasdaq", "wti", "usdkrw")
 
 
 def _num(v: str | None) -> float | None:
@@ -51,101 +56,149 @@ def _num(v: str | None) -> float | None:
         return None
 
 
-def stooq_quote(f: Fetcher, symbol: str) -> dict | None:
-    r = f.get(STOOQ_URL, params={"s": symbol, "f": "sd2t2ohlc", "h": "", "e": "csv"})
-    rows = list(csv.DictReader(io.StringIO(r.text)))
-    if not rows:
-        return None
-    row = rows[0]
-    close = _num(row.get("Close"))
-    if close is None:  # "N/D" = no data for this symbol
-        return None
-    d, t = row.get("Date", ""), row.get("Time", "")
-    return {"value": close, "open": _num(row.get("Open")), "as_of": f"{d} {t}".strip(),
-            "source": "Stooq", "basis": "지연 시세", "url": f"https://stooq.com/q/?s={symbol}"}
+def _md(iso_day: str) -> str:
+    try:
+        d = date.fromisoformat(iso_day[:10])
+        return f"{d.month}/{d.day}"
+    except ValueError:
+        return iso_day
 
 
-def fred_latest(f: Fetcher, series: str, basis: str) -> dict | None:
-    start = (date.today() - timedelta(days=21)).isoformat()
-    r = f.get(FRED_URL, params={"id": series, "cosd": start})
-    obs = [(row[0], _num(row[1])) for row in csv.reader(io.StringIO(r.text)) if len(row) >= 2]
+def _with_change(q: dict) -> dict:
+    prev = q.get("prev")
+    if prev:
+        q["change_pct"] = round((q["value"] - prev) / prev * 100, 2)
+        if q.get("unit") == "%":  # yields: percentage points
+            q["change_pp"] = round(q["value"] - prev, 2)
+    return q
+
+
+def fred_latest(f: Fetcher, key: str, series: str, name: str, short: str, unit: str, kind: str) -> dict | None:
+    start = (date.today() - timedelta(days=30)).isoformat()
+    text = f.text(FRED_URL, params={"id": series, "cosd": start})
+    obs = [(row[0], _num(row[1])) for row in csv.reader(io.StringIO(text)) if len(row) >= 2]
     obs = [(d, v) for d, v in obs[1:] if v is not None]
     if not obs:
         return None
-    (d, v) = obs[-1]
-    prev = obs[-2][1] if len(obs) >= 2 else None
-    return {"value": v, "prev": prev, "as_of": d, "source": "FRED", "basis": basis,
-            "url": f"https://fred.stlouisfed.org/series/{series}"}
+    d, v = obs[-1]
+    return _with_change({
+        "name_ko": name, "label": f"{name}({_md(d)} {kind})", "short_ko": short, "unit": unit,
+        "value": v, "prev": obs[-2][1] if len(obs) >= 2 else None, "as_of": d,
+        "change_basis": "직전 발표값 대비" if len(obs) >= 2 else None,
+        "source": "FRED", "series": series, "url": f"https://fred.stlouisfed.org/series/{series}"})
 
 
-def _history_ref(history: list[dict], key: str, now: datetime) -> float | None:
-    """Value about 24h ago from our own snapshots (for Stooq, which gives no previous close)."""
-    best = None
-    for snap in history:
+def parse_ecb_hist(xml_bytes: bytes) -> list[tuple[str, dict[str, float]]]:
+    """[(date, {currency: rate per EUR})], newest first."""
+    root = ET.fromstring(xml_bytes)
+    days = []
+    for el in root.iter():
+        t = el.attrib.get("time")
+        if t:
+            rates = {c.attrib["currency"]: float(c.attrib["rate"]) for c in el
+                     if "currency" in c.attrib and "rate" in c.attrib}
+            days.append((t, rates))
+    return sorted(days, reverse=True)
+
+
+def ecb_usdkrw(f: Fetcher) -> dict | None:
+    days = [(d, r["KRW"] / r["USD"]) for d, r in parse_ecb_hist(f.get(ECB_HIST_URL).content)
+            if "KRW" in r and "USD" in r]
+    if not days:
+        return None
+    d, v = days[0]
+    return _with_change({
+        "name_ko": "원/달러 환율(ECB 기준환율 환산)", "label": f"원/달러(ECB 환산, {_md(d)} 기준)",
+        "short_ko": "원/달러", "unit": "원", "value": round(v, 2),
+        "prev": round(days[1][1], 2) if len(days) > 1 else None, "as_of": d,
+        "change_basis": "전 영업일 대비" if len(days) > 1 else None,
+        "source": "ECB", "url": "https://www.ecb.europa.eu/stats/policy_and_exchange_rates/euro_reference_exchange_rates/html/index.en.html"})
+
+
+def binance_24h(f: Fetcher) -> dict[str, dict]:
+    syms = json.dumps([s for _, s, _ in CRYPTO], separators=(",", ":"))
+    last: Exception | None = None
+    for host in BINANCE_HOSTS:
         try:
-            at = datetime.fromisoformat(snap["at"])
-        except (KeyError, ValueError):
+            data = f.get(host + "/api/v3/ticker/24hr", params={"symbols": syms}).json()
+            break
+        except Exception as exc:  # try the public market-data mirror
+            last = exc
+    else:
+        raise last or RuntimeError("binance unavailable")
+    by = {d["symbol"]: d for d in data}
+    out = {}
+    for key, sym, name in CRYPTO:
+        d = by.get(sym)
+        if not d:
             continue
-        age = now - at
-        if timedelta(hours=20) <= age <= timedelta(hours=40):
-            v = (snap.get("values") or {}).get(key)
-            if v is not None:
-                best = v  # history is chronological; keep the newest qualifying one
-    return best
+        at = datetime.fromtimestamp(int(d["closeTime"]) / 1000, timezone.utc)
+        out[key] = {"name_ko": f"{name} 현재가(바이낸스, USDT)", "label": f"{name}(바이낸스)", "short_ko": name,
+                    "unit": "$", "value": float(d["lastPrice"]), "change_pct": round(float(d["priceChangePercent"]), 2),
+                    "change_basis": "24시간 변화", "as_of": at.isoformat(timespec="seconds"),
+                    "source": "Binance", "url": f"https://www.binance.com/en/trade/{name}_USDT"}
+    return out
 
 
-def fetch_markets(f: Fetcher, history: list[dict] | None = None, now: datetime | None = None
-                  ) -> tuple[dict[str, Any], dict[str, str]]:
-    now = now or datetime.now(timezone.utc)
+def fetch_markets(f: Fetcher, *_ignored) -> tuple[dict[str, Any], dict[str, str]]:
     out: dict[str, Any] = {}
     status: dict[str, str] = {}
-    for key, label, unit, sym, fred in INDICATORS:
-        q, errs = None, []
-        if sym:
-            try:
-                q = stooq_quote(f, sym)
-                if q:
-                    ref = _history_ref(history or [], key, now)
-                    q["prev"] = ref
-                    q["change_basis"] = "24시간 전 대비" if ref is not None else None
-            except Exception as exc:
-                errs.append(f"stooq {type(exc).__name__}")
-        if q is None and fred:
-            try:
-                q = fred_latest(f, *fred)
-                if q:
-                    q["change_basis"] = "전 거래일 대비" if q.get("prev") is not None else None
-            except Exception as exc:
-                errs.append(f"fred {type(exc).__name__}")
-        if q is None:
-            status[key] = "error:" + (", ".join(errs) or "no data")
-            continue
-        prev = q.get("prev")
-        if prev:
-            q["change_pct"] = round((q["value"] - prev) / prev * 100, 2)
-            if unit == "%":  # yields: points, not percent
-                q["change_bp"] = round((q["value"] - prev) * 100, 1)
-        out[key] = {"label": label, "unit": unit, **q}
-        status[key] = f"ok:{q['source']}"
-    return out, status
+    try:
+        got = binance_24h(f)
+        out.update(got)
+        for key, *_ in CRYPTO:
+            status[key] = "ok:Binance" if key in got else "error:no data"
+    except Exception as exc:
+        for key, *_ in CRYPTO:
+            status[key] = f"error:binance {type(exc).__name__}"
+    for spec in FRED_SERIES:
+        try:
+            q = fred_latest(f, *spec)
+            if q:
+                out[spec[0]] = q
+            status[spec[0]] = "ok:FRED" if q else "error:no data"
+        except Exception as exc:
+            status[spec[0]] = f"error:fred {type(exc).__name__}"
+    q, errs = None, []
+    try:
+        q = ecb_usdkrw(f)
+    except Exception as exc:
+        errs.append(f"ecb {type(exc).__name__}")
+    if q is None:
+        try:
+            q = fred_latest(f, "usdkrw", "DEXKOUS", "원/달러 환율(연준 H.10)", "원/달러", "원", "기준")
+        except Exception as exc:
+            errs.append(f"fred {type(exc).__name__}")
+    if q:
+        out["usdkrw"] = q
+        status["usdkrw"] = f"ok:{q['source']}"
+    else:
+        status["usdkrw"] = "error:" + (", ".join(errs) or "no data")
+    return {k: out[k] for k in ORDER if k in out}, status
+
+
+def _fmt(v: float) -> str:
+    return f"{v:,.4f}" if v < 1 else f"{v:,.2f}" if v < 100 else f"{v:,.1f}" if v < 10000 else f"{v:,.0f}"
 
 
 def market_line(markets: dict[str, Any]) -> str:
-    """One-line Korean summary for the UI, e.g. '달러지수 104.2 · 미 국채 10년 4.41%(+3bp) · …'."""
+    """One-line Korean summary for the UI, e.g. 'BTC 95,120(-1.2%) · 미10년 4.41%(+0.03%p, 11/14) · …'."""
     parts = []
-    for key, *_ in INDICATORS:
+    for key in ORDER:
         m = markets.get(key)
         if not m:
             continue
-        v = m["value"]
-        txt = f"{v:,.2f}" if v < 100 else f"{v:,.1f}" if v < 10000 else f"{v:,.0f}"
-        if m["unit"] == "%":
-            txt += "%"
-            if m.get("change_bp") is not None:
-                txt += f"({m['change_bp']:+.0f}bp)"
+        txt = _fmt(m["value"]) + ("%" if m["unit"] == "%" else "")
+        if m.get("change_pp") is not None:
+            txt += f"({m['change_pp']:+.2f}%p"
         elif m.get("change_pct") is not None:
-            txt += f"({m['change_pct']:+.1f}%)"
-        parts.append(f"{m['label']} {txt}")
+            txt += f"({m['change_pct']:+.1f}%"
+        else:
+            txt += "("
+        if m.get("source") != "Binance":
+            txt += (", " if not txt.endswith("(") else "") + _md(m.get("as_of", ""))
+        txt = txt + ")" if not txt.endswith("(") else txt[:-1]
+        parts.append(f"{m.get('short_ko') or m.get('label')} {txt}")
     return " · ".join(parts)
 
 
@@ -175,56 +228,73 @@ FOMC_2026_FALLBACK = (("2026-01-27", "2026-01-28"), ("2026-03-17", "2026-03-18")
 
 def _ics_unfold(text: str) -> list[str]:
     out: list[str] = []
-    for line in text.replace("\r\n", "\n").split("\n"):
+    for line in text.lstrip("\ufeff").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
         if line[:1] in (" ", "\t") and out:
             out[-1] += line[1:]
         else:
-            out.append(line)
+            out.append(line.rstrip())
     return out
 
 
-def parse_ics(text: str) -> list[dict]:
-    events, cur = [], None
+def parse_ics(text: str) -> tuple[list[dict], str | None]:
+    """Returns (events, calendar default timezone from X-WR-TIMEZONE)."""
+    events, cur, default_tz = [], None, None
     for line in _ics_unfold(text):
-        if line == "BEGIN:VEVENT":
+        up = line.upper()
+        if up == "BEGIN:VEVENT":
             cur = {}
-        elif line == "END:VEVENT":
+        elif up == "END:VEVENT":
             if cur is not None:
                 events.append(cur)
             cur = None
-        elif cur is not None and ":" in line:
+        elif ":" in line:
             head, val = line.split(":", 1)
             name, *params = head.split(";")
-            cur[name.upper()] = (val, dict(p.split("=", 1) for p in params if "=" in p))
-    return events
+            pdict = {k.upper(): v.strip('"') for k, v in (p.split("=", 1) for p in params if "=" in p)}
+            if cur is None:
+                if name.upper() == "X-WR-TIMEZONE":
+                    default_tz = val.strip()
+            else:
+                cur[name.upper()] = (val.strip(), pdict)
+    return events, default_tz
 
 
-def _ics_dt(val: str, params: dict) -> datetime | None:
-    val = val.strip()
+def _zone(tzid: str | None) -> Any:
+    if not tzid:
+        return ET_TZ
     try:
-        if len(val) == 8:  # VALUE=DATE
-            return datetime.strptime(val, "%Y%m%d").replace(hour=8, minute=30, tzinfo=ET_TZ)
-        if val.endswith("Z"):
-            return datetime.strptime(val, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
-        dt = datetime.strptime(val[:15], "%Y%m%dT%H%M%S")
-        tzid = params.get("TZID", "")
-        try:
-            tz = ZoneInfo(tzid) if tzid else ET_TZ
-        except Exception:
-            tz = ET_TZ  # e.g. "US-Eastern"
-        return dt.replace(tzinfo=tz)
+        return ZoneInfo(tzid)
+    except Exception:
+        return ET_TZ  # e.g. "US-Eastern", "Eastern Standard Time": both publishers are in Washington DC
+
+
+def _ics_dt(val: str, params: dict, default_tz: str | None = None) -> datetime | None:
+    """DTSTART in any of: 20261125 (all-day), 20261125T083000, ...Z, with/without TZID, dashed ISO."""
+    v = val.strip().replace("-", "").replace(":", "")
+    try:
+        if params.get("VALUE", "").upper() == "DATE" or (len(v) == 8 and v.isdigit()):
+            # all-day entry: US data releases come out at 08:30 ET
+            return datetime.strptime(v[:8], "%Y%m%d").replace(hour=8, minute=30, tzinfo=ET_TZ)
+        utc = v.endswith("Z")
+        v = v.rstrip("Z")
+        fmt = "%Y%m%dT%H%M%S" if len(v) >= 15 else "%Y%m%dT%H%M"
+        dt = datetime.strptime(v[:15] if len(v) >= 15 else v[:13], fmt)
+        if utc:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt.replace(tzinfo=_zone(params.get("TZID") or default_tz))
     except ValueError:
         return None
 
 
 def calendar_from_ics(text: str, source: str, url: str) -> list[dict]:
     rows = []
-    for ev in parse_ics(text):
-        summary = ev.get("SUMMARY", ("", {}))[0].replace("\\,", ",").strip()
+    events, default_tz = parse_ics(text)
+    for ev in events:
+        summary = ev.get("SUMMARY", ("", {}))[0].replace("\\,", ",").replace("\\;", ";").strip()
         hit = next((k for k in CAL_KEYWORDS if k[0].lower() in summary.lower()), None)
         if not hit or "DTSTART" not in ev:
             continue
-        dt = _ics_dt(*ev["DTSTART"])
+        dt = _ics_dt(*ev["DTSTART"], default_tz)
         if dt is None:
             continue
         rows.append(_cal_row(dt, hit[1], summary, hit[2], hit[3], source, url))
@@ -284,13 +354,13 @@ def fetch_calendar(f: Fetcher) -> tuple[list[dict], dict[str, str]]:
     status: dict[str, str] = {}
     for name, url in (("BLS-schedule", BLS_ICS), ("BEA-schedule", BEA_ICS)):
         try:
-            got = calendar_from_ics(f.get(url).text, name.split("-")[0], url)
+            got = calendar_from_ics(f.text(url, accept="text/calendar, */*"), name.split("-")[0], url)
             rows += got
             status[name] = f"ok:{len(got)}"
         except Exception as exc:
             status[name] = f"error:{type(exc).__name__}: {str(exc)[:100]}"
     try:
-        meetings = parse_fomc_page(f.get(FOMC_URL).text)
+        meetings = parse_fomc_page(f.text(FOMC_URL))
         if not meetings:
             raise ValueError("no meetings parsed")
         rows += fomc_events(meetings, "Fed")
@@ -303,9 +373,37 @@ def fetch_calendar(f: Fetcher) -> tuple[list[dict], dict[str, str]]:
     return sorted(uniq.values(), key=lambda r: r["at_utc"]), status
 
 
-def upcoming(calendar: list[dict], now: datetime, days: int = 7) -> list[dict]:
-    end = now + timedelta(days=days)
-    return [r for r in calendar if now <= datetime.fromisoformat(r["at_utc"]) <= end]
+def _at(r: dict) -> datetime | None:
+    try:
+        dt = datetime.fromisoformat(r["at_utc"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def upcoming(calendar: list[dict], now: datetime, days: int = 7, start_days: int = 0) -> list[dict]:
+    """Events from now+start_days to now+days (inclusive), oldest first."""
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    lo, hi = now + timedelta(days=start_days), now + timedelta(days=days)
+    rows = [(at, r) for r in calendar if (at := _at(r)) and lo <= at <= hi]
+    return [r for _, r in sorted(rows, key=lambda x: x[0])]
+
+
+def later(calendar: list[dict], now: datetime, n: int = 5) -> list[dict]:
+    """The next few events after the 7-day window (within 45 days) — used when the week is quiet."""
+    return upcoming(calendar, now, 45, start_days=7)[:n]
+
+
+def calendar_summary(calendar: list[dict], now: datetime) -> dict[str, str]:
+    """Per source: total / future / in next 7 days / next date — shown by --check-sources."""
+    out: dict[str, str] = {}
+    for src in sorted({r["source"] for r in calendar}):
+        rows = [r for r in calendar if r["source"] == src]
+        fut = upcoming(rows, now, 3650)
+        nxt = f"{fut[0]['date_kst']} {fut[0]['time_kst']} {fut[0]['name_ko']}" if fut else "없음"
+        out[src] = f"전체 {len(rows)} · 앞으로 {len(fut)} · 7일 안 {len(upcoming(rows, now, 7))} · 다음: {nxt}"
+    return out
 
 
 def atomic_write_json(path: Path, obj: Any) -> None:
