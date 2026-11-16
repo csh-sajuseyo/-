@@ -72,7 +72,7 @@ def test_collector_classifies_dedups_and_clamps(tmp_path):
     fake = FakeMessages()
     its = items(20)
     col = Collector(cfg, data_dir=tmp_path, fetcher=FakeFetcher(its + its[:3]),
-                    classifier=make_classifier(budget, fake))
+                    classifier=make_classifier(budget, fake), macro=False)
     s = col.run_once()
     assert s["new"] == 20 and s["classified"] == 20 and fake.calls == 2  # batches of 15
     rows = [json.loads(l) for l in (tmp_path / "news_events.jsonl").read_text().splitlines()]
@@ -86,7 +86,7 @@ def test_budget_cap_stops_classification(tmp_path):
     budget = DailyBudget(tmp_path / "cost_ledger.json", cap, "claude-haiku-5-5")
     fake = FakeMessages()
     col = Collector(cfg, data_dir=tmp_path, fetcher=FakeFetcher(items(5)),
-                    classifier=make_classifier(budget, fake))
+                    classifier=make_classifier(budget, fake), macro=False)
     s = col.run_once()
     # worst-case pre-check (2048 max output tokens ≈ $0.001) already exceeds the cap -> no call
     assert fake.calls == 0 and s["classified"] == 0 and "daily cap" in s["classify_stopped"]

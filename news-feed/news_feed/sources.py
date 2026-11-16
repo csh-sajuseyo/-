@@ -1,12 +1,17 @@
-"""Key-less public sources: crypto RSS feeds, Upbit notices, Binance announcements.
+"""Key-less public sources: crypto RSS, exchange notices, central banks, US data releases, economic news.
 
 RSS feed list and the RSS 2.0 / Atom parsing approach are reused from
 coin-auto-trader `coinai/news_engine.py` (NewsEngine.DIRECT_CRYPTO_FEEDS,
-NewsEngine._parse_xml), trimmed to what a collector needs.
+NewsEngine._parse_xml). RSS 1.0 (RDF) support was added for the Bank of Japan.
+
+Every source here is free, needs no login or key, and is published as a feed
+for automated readers. Why each one was chosen: docs/SOURCES.md.
 """
 from __future__ import annotations
 
 import hashlib
+import html
+import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -15,20 +20,48 @@ from typing import Any, Callable
 
 import requests
 
-USER_AGENT = "news-feed/0.1 (+public RSS/notice collector)"
+USER_AGENT = "news-feed/0.2 (+personal research; public RSS/notice collector)"
 TIMEOUT = 15
 
-# (source name, url, reliability) — same feeds as coin-auto-trader NewsEngine.
-RSS_FEEDS: tuple[tuple[str, str, float], ...] = (
-    ("CoinDesk", "https://www.coindesk.com/arc/outboundfeeds/rss", 1.00),
-    ("Cointelegraph", "https://cointelegraph.com/rss", 0.92),
-    ("Decrypt", "https://decrypt.co/feed", 0.88),
+
+@dataclass(frozen=True)
+class Feed:
+    name: str
+    url: str
+    group: str          # "crypto" | "macro"  (exchange notices are their own group)
+    reliability: float
+    lang: str = "en"
+
+
+RSS_FEEDS: tuple[Feed, ...] = (
+    # crypto — same feeds as coin-auto-trader NewsEngine
+    Feed("CoinDesk", "https://www.coindesk.com/arc/outboundfeeds/rss", "crypto", 1.00),
+    Feed("Cointelegraph", "https://cointelegraph.com/rss", "crypto", 0.92),
+    Feed("Decrypt", "https://decrypt.co/feed", "crypto", 0.88),
+    # central banks (official press releases)
+    Feed("Fed", "https://www.federalreserve.gov/feeds/press_all.xml", "macro", 1.00),
+    Feed("ECB", "https://www.ecb.europa.eu/rss/press.html", "macro", 1.00),
+    Feed("BOJ", "https://www.boj.or.jp/en/rss/whatsnew.xml", "macro", 1.00),
+    Feed("BOK", "https://www.bok.or.kr/portal/bbs/B0000338/news.rss?menuNo=200761", "macro", 1.00, "ko"),
+    # US official statistics releases
+    Feed("BLS", "https://www.bls.gov/feed/bls_latest.rss", "macro", 1.00),
+    Feed("BEA", "https://apps.bea.gov/rss/rss.xml", "macro", 1.00),
+    # economic news (1 Korean + 2 English)
+    Feed("Yonhap", "https://www.yna.co.kr/rss/economy.xml", "macro", 0.90, "ko"),
+    Feed("CNBC", "https://www.cnbc.com/id/20910258/device/rss/rss.html", "macro", 0.85),
+    Feed("BBC", "https://feeds.bbci.co.uk/news/business/rss.xml", "macro", 0.88),
 )
 
 UPBIT_URL = "https://api-manager.upbit.com/api/v1/announcements"
 BINANCE_URL = "https://www.binance.com/bapi/composite/v1/public/cms/article/list/query"
 # 48 New Listing, 49 Latest News, 161 Delisting, 157 Maintenance (wallet/deposit halts)
 BINANCE_CATALOGS = {48: "listing", 49: "news", 161: "delisting", 157: "maintenance"}
+
+NS = {
+    "a": "http://www.w3.org/2005/Atom",
+    "rss1": "http://purl.org/rss/1.0/",
+    "dc": "http://purl.org/dc/elements/1.1/",
+}
 
 
 @dataclass
@@ -40,6 +73,8 @@ class RawItem:
     published_at: str | None  # ISO-8601 UTC
     reliability: float = 0.8
     category: str | None = None
+    group: str = "crypto"     # "crypto" | "macro" | "exchange"
+    summary: str = ""         # feed description, plain text, short
     extra: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -62,7 +97,7 @@ def _parse_date(value: str) -> str | None:
         return None
     try:
         return _iso(parsedate_to_datetime(value))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, IndexError):
         pass
     try:
         return _iso(datetime.fromisoformat(value.replace("Z", "+00:00")))
@@ -70,51 +105,67 @@ def _parse_date(value: str) -> str | None:
         return None
 
 
-def parse_feed(xml_text: str, source: str, reliability: float) -> list[RawItem]:
-    root = ET.fromstring(xml_text)
+_TAG = re.compile(r"<[^>]+>")
+
+
+def clean_text(value: str | None, limit: int = 240) -> str:
+    text = html.unescape(_TAG.sub(" ", value or ""))
+    text = re.sub(r"\s+", " ", text).strip()
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def parse_feed(xml_text: str | bytes, source: str, reliability: float, group: str = "crypto") -> list[RawItem]:
+    """RSS 2.0, Atom and RSS 1.0 (RDF)."""
+    if isinstance(xml_text, bytes):
+        root = ET.fromstring(xml_text.lstrip(b"\xef\xbb\xbf \r\n\t"))
+    else:
+        root = ET.fromstring(xml_text.lstrip("\ufeff \r\n\t"))
+
+    def mk(title, url, date, desc):
+        return RawItem(source=source, kind="rss", title=clean_text(title, 300), url=(url or "").strip(),
+                       published_at=_parse_date(date or ""), reliability=reliability,
+                       group=group, summary=clean_text(desc))
+
     rows: list[RawItem] = []
     for node in root.findall("./channel/item")[:80]:  # RSS 2.0
-        title = (node.findtext("title") or "").strip()
-        if not title:
-            continue
-        rows.append(RawItem(
-            source=source, kind="rss", title=title,
-            url=(node.findtext("link") or "").strip(),
-            published_at=_parse_date(node.findtext("pubDate") or ""),
-            reliability=reliability,
-        ))
-    if rows:
-        return rows
-    ns = {"a": "http://www.w3.org/2005/Atom"}  # Atom fallback
-    for node in root.findall("a:entry", ns)[:80]:
-        title = (node.findtext("a:title", default="", namespaces=ns) or "").strip()
-        if not title:
-            continue
-        link = node.find("a:link", ns)
-        rows.append(RawItem(
-            source=source, kind="rss", title=title,
-            url=link.attrib.get("href", "") if link is not None else "",
-            published_at=_parse_date(node.findtext("a:published", default="", namespaces=ns)
-                                     or node.findtext("a:updated", default="", namespaces=ns)),
-            reliability=reliability,
-        ))
-    return rows
+        rows.append(mk(node.findtext("title"), node.findtext("link"),
+                       node.findtext("pubDate") or node.findtext("dc:date", namespaces=NS),
+                       node.findtext("description")))
+    if not rows:  # Atom
+        for node in root.findall("a:entry", NS)[:80]:
+            link = node.find("a:link[@rel='alternate']", NS)
+            if link is None:
+                link = node.find("a:link", NS)
+            rows.append(mk(node.findtext("a:title", namespaces=NS),
+                           link.attrib.get("href", "") if link is not None else "",
+                           node.findtext("a:published", namespaces=NS) or node.findtext("a:updated", namespaces=NS),
+                           node.findtext("a:summary", namespaces=NS)))
+    if not rows:  # RSS 1.0 / RDF (Bank of Japan)
+        for node in root.findall("rss1:item", NS)[:80]:
+            rows.append(mk(node.findtext("rss1:title", namespaces=NS), node.findtext("rss1:link", namespaces=NS),
+                           node.findtext("dc:date", namespaces=NS),
+                           node.findtext("rss1:description", namespaces=NS)))
+    return [r for r in rows if r.title]
 
 
 class Fetcher:
-    def __init__(self, session: requests.Session | None = None) -> None:
+    def __init__(self, session: requests.Session | None = None, contact: str = "") -> None:
         self.session = session or requests.Session()
-        self.session.headers.update({"User-Agent": USER_AGENT})
+        ua = USER_AGENT if not contact else f"news-feed/0.2 (personal research; {contact})"
+        self.session.headers.update({"User-Agent": ua})
 
-    def rss(self, source: str, url: str, reliability: float) -> list[RawItem]:
-        r = self.session.get(url, timeout=TIMEOUT)
+    def get(self, url: str, **kw) -> requests.Response:
+        r = self.session.get(url, timeout=TIMEOUT, **kw)
         r.raise_for_status()
-        return parse_feed(r.text, source, reliability)
+        return r
+
+    def rss(self, feed: Feed) -> list[RawItem]:
+        r = self.get(feed.url)
+        return parse_feed(r.content, feed.name, feed.reliability, feed.group)  # bytes: XML decl decides encoding
 
     def upbit(self) -> list[RawItem]:
-        r = self.session.get(UPBIT_URL, timeout=TIMEOUT, headers={"Accept": "application/json"},
-                             params={"os": "web", "page": 1, "per_page": 20, "category": "all"})
-        r.raise_for_status()
+        r = self.get(UPBIT_URL, headers={"Accept": "application/json"},
+                     params={"os": "web", "page": 1, "per_page": 20, "category": "all"})
         data = r.json().get("data") or {}
         rows = []
         for n in data.get("notices") or data.get("list") or []:
@@ -123,14 +174,12 @@ class Fetcher:
                 source="Upbit", kind="upbit_notice", title=str(n.get("title") or "").strip(),
                 url=f"https://upbit.com/service_center/notice?id={nid}" if nid else "",
                 published_at=_parse_date(str(n.get("listed_at") or n.get("first_listed_at") or "")),
-                reliability=1.0, category=n.get("category"),
+                reliability=1.0, category=n.get("category"), group="exchange",
             ))
         return [x for x in rows if x.title]
 
     def binance(self) -> list[RawItem]:
-        r = self.session.get(BINANCE_URL, timeout=TIMEOUT,
-                             params={"type": 1, "pageNo": 1, "pageSize": 20})
-        r.raise_for_status()
+        r = self.get(BINANCE_URL, params={"type": 1, "pageNo": 1, "pageSize": 20})
         rows = []
         for cat in (r.json().get("data") or {}).get("catalogs") or []:
             label = BINANCE_CATALOGS.get(cat.get("catalogId"))
@@ -142,13 +191,13 @@ class Fetcher:
                     source="Binance", kind="binance_notice", title=str(a.get("title") or "").strip(),
                     url=f"https://www.binance.com/en/support/announcement/{a.get('code')}",
                     published_at=_iso(datetime.fromtimestamp(ts / 1000, timezone.utc)) if ts else None,
-                    reliability=1.0, category=label,
+                    reliability=1.0, category=label, group="exchange",
                 ))
         return [x for x in rows if x.title]
 
     def jobs(self) -> list[tuple[str, Callable[[], list[RawItem]]]]:
         out: list[tuple[str, Callable[[], list[RawItem]]]] = [
-            (name, (lambda n=name, u=url, rel=rel: self.rss(n, u, rel))) for name, url, rel in RSS_FEEDS
+            (f.name, (lambda f=f: self.rss(f))) for f in RSS_FEEDS
         ]
         out.append(("Upbit", self.upbit))
         out.append(("Binance", self.binance))

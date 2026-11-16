@@ -1,0 +1,69 @@
+<!doctype html><html lang="ko"><meta charset="utf-8"><link rel="stylesheet" href="base.css">
+<style>
+h1{font-size:26px;font-weight:700;padding:6px 20px 12px;letter-spacing:-0.02em}
+.brief{margin:0 16px;background:var(--card);border-radius:16px;padding:18px 18px 14px;box-shadow:0 1px 0 var(--line)}
+.bh{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:12px}
+.bh strong{font-size:17px;font-weight:700}
+.bh span{font-size:12.5px;color:var(--mute)}
+.brief ol{list-style:none;counter-reset:n}
+.brief li{counter-increment:n;display:flex;gap:10px;font-size:15px;line-height:1.45;color:var(--ink);padding:5px 0}
+.brief li:before{content:counter(n);flex:none;width:20px;height:20px;border-radius:50%;background:var(--tag);
+font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center;margin-top:1px;color:var(--ink2)}
+.mk{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:12px;padding-top:12px;border-top:1px solid var(--line);font-size:12px;color:var(--mute)}.mk div{display:flex;flex-direction:column;gap:2px}.mk div span{font-size:14px;color:var(--ink);font-weight:600}
+.mk b{font-weight:600;color:var(--ink)}
+.bf{display:flex;justify-content:space-between;margin-top:10px;font-size:13px}
+.bf .c{color:var(--mute)}.bf .c b{color:var(--ink2);font-weight:600}
+.bf a{color:var(--ink);font-weight:600;text-decoration:none}
+.filters{display:flex;gap:7px;padding:18px 16px 4px;white-space:nowrap;overflow:hidden;-webkit-mask-image:linear-gradient(90deg,#000 88%,transparent)}
+.chip{padding:8px 13px;border-radius:99px;background:var(--card);font-size:14px;font-weight:500;color:var(--ink2);border:1px solid var(--line)}
+.chip.on{background:var(--ink);color:#fff;border-color:var(--ink);font-weight:600}
+.sub{display:flex;justify-content:space-between;align-items:center;padding:12px 20px 6px;font-size:13px;color:var(--mute)}
+.tog{display:flex;align-items:center;gap:7px;color:var(--ink2);font-weight:500}
+.sw{width:34px;height:20px;border-radius:99px;background:#D9D3C8;position:relative}
+.sw:after{content:"";position:absolute;left:2px;top:2px;width:16px;height:16px;border-radius:50%;background:#fff}
+.list{padding:0 16px}
+.it{display:flex;gap:12px;padding:14px 4px;border-bottom:1px solid var(--line)}
+.bar{flex:none;width:4px;border-radius:2px;background:var(--line)}
+.bar.i5{background:var(--hot)}.bar.i4{background:#7D776C}
+.meta{font-size:12.5px;color:var(--mute);display:flex;gap:6px;align-items:center;margin-bottom:4px}
+.hot{background:var(--hot);color:#fff;font-size:11px;font-weight:700;padding:2px 6px;border-radius:4px}
+.t{font-size:15.5px;font-weight:600;line-height:1.4}
+.w{font-size:13.5px;color:var(--ink2);line-height:1.4;margin-top:4px}
+.tags{display:flex;gap:6px;margin-top:7px}
+.tg{font-size:12px;font-weight:600;padding:3px 7px;border-radius:5px;background:var(--tag);color:var(--ink2)}
+.tg.bad{background:#F6E3D6;color:#9A3D12}.tg.neu{background:var(--tag)}
+.mk i{font-style:normal;font-weight:500;font-size:13px}
+</style>
+<body>
+<div class="status">9:41<i>●●● ▮</i></div>
+<h1>뉴스</h1>
+<section class="brief">
+ <div class="bh"><strong>오늘의 세계경제 한눈에</strong><span>11월 16일 08:20</span></div>
+ <ol>
+  <li>미국 물가 발표(수 22:30)를 앞두고 금리 인하 기대가 줄며 달러가 강세입니다.</li>
+  <li>미국 증시는 기술주 중심으로 쉬어 가는 흐름, 중동 긴장은 아직 진정 전입니다.</li>
+  <li>비트코인은 ETF 자금 유출이 이어져 위험자산 분위기를 그대로 따라가고 있습니다.</li>
+ </ol>
+ <div class="mk"><div>달러<span>104.2 <i class="up">▲0.3%</i></span></div><div>미국 금리(10년)<span>4.41% <i class="up">▲0.03</i></span></div><div>나스닥 선물<span><i class="down">▼0.6%</i></span></div></div>
+ <div class="bf"><span class="c">지난 12시간 소식으로 정리</span><a>전체 브리핑 ›</a></div>
+</section>
+<div class="filters"><span class="chip on">전체</span><span class="chip">내 코인</span><span class="chip">코인</span><span class="chip">세계경제</span><span class="chip">거래소 공지</span></div>
+<div class="sub"><span>최근 12시간 소식 38건</span><span class="tog">중요한 것만<span class="sw"></span></span></div>
+<div class="list">
+ <div class="it"><div class="bar i5"></div><div>
+  <div class="meta"><span class="hot">매우 중요</span>연준 · 14분 전</div>
+  <div class="t">파월 의장 “12월 인하는 정해진 것 없다”</div>
+  <div class="w">금리 인하 기대가 꺾이면 달러가 오르고 코인엔 부담</div>
+  <div class="tags"><span class="tg bad">BTC 불리</span><span class="tg">금리</span></div></div></div>
+ <div class="it"><div class="bar i5"></div><div>
+  <div class="meta"><span class="hot">매우 중요</span>업비트 공지 · 32분 전</div>
+  <div class="t">스텔라루멘(XLM) 입출금 일시 중단 – 네트워크 업그레이드</div>
+  <div class="w">내 코인 · 업그레이드 끝날 때까지 이체 불가</div>
+  <div class="tags"><span class="tg bad">XLM 이체 주의</span><span class="tg">입출금</span></div></div></div>
+ <div class="it"><div class="bar i4"></div><div>
+  <div class="meta">CNBC · 1시간 전</div>
+  <div class="t">미 국채 10년 금리 4.4%대로 올라</div>
+  <div class="w">금리가 오르면 위험자산 선호가 약해질 수 있음</div></div></div>
+</div>
+<nav class="tabs"><div><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 20h18"/><path d="M5 16l4-5 4 3 6-8"/></svg>차트</div><div class="on"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M8 9h8M8 13h8M8 17h5"/></svg>뉴스</div><div><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15z"/><path d="M10 20.5a2 2 0 0 0 4 0"/></svg>알림</div><div><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1"/></svg>설정</div></nav>
+</body></html>
