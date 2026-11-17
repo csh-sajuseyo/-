@@ -6,6 +6,7 @@
     python run.py --report        # status: classified counts, cost per day, importance, top items, last brief
     python run.py --check-sources # try every source once and print ok / error (writes nothing)
     python run.py --brief-now     # make a briefing right now (costs ~$0.03-0.06)
+    python run.py --summarize-backfill  # body summaries for the last 24h of important articles (within the cap)
 """
 from __future__ import annotations
 
@@ -56,6 +57,22 @@ def report(since: str | None = None) -> None:
     b = read_tail(DATA / "briefs.jsonl", 1)
     if b:
         print(f"최근 브리핑: {b[-1]['slot']} (모델 {b[-1]['model']}, ${b[-1]['cost_usd']:.4f})")
+    sums = [r for r in rows if r.get("body_summary")]
+    logs_all = read_tail(DATA / "run_log.jsonl", 5000)
+    reads: Counter = Counter()
+    for r in logs_all:
+        reads.update((r.get("summarize") or {}).get("read") or {})
+    tried = sum(reads.values())
+    print(f"본문 요약: {len(sums)}건 (원문 {sum(1 for r in sums if r['body_summary']['basis'] == '원문')}, "
+          f"제목만 {sum(1 for r in sums if r['body_summary']['basis'] != '원문')})"
+          + (f", 본문 못 읽은 비율 {(tried - reads['ok']) / tried:.0%} ({dict(reads.most_common())})" if tried else ""))
+    for r in sorted(sums, key=lambda r: (r.get("importance") or 0, r.get("published_at") or ""), reverse=True)[:2]:
+        b = r["body_summary"]
+        print(f"  [{r.get('importance')}] {r['source']}: {r.get('summary_ko') or r['title']}  ({b['basis']})")
+        for p in b["points"]:
+            print(f"     - {p}")
+        if b["numbers"]:
+            print(f"     숫자: {' / '.join(b['numbers'])}")
     stops = Counter((r.get("classify_stopped") or "")[:60] for r in read_tail(DATA / "run_log.jsonl", 2000)
                     if r.get("classify_stopped"))
     if stops:
@@ -100,6 +117,7 @@ def main() -> None:
     ap.add_argument("--since", help="--report: only classified rows collected at/after this ISO time")
     ap.add_argument("--check-sources", action="store_true")
     ap.add_argument("--brief-now", action="store_true")
+    ap.add_argument("--summarize-backfill", action="store_true")
     ap.add_argument("--log-file", help="write logs here (needed under pythonw, which has no console)")
     args = ap.parse_args()
     if hasattr(sys.stdout, "reconfigure"):
@@ -114,6 +132,26 @@ def main() -> None:
     if args.check_sources:
         raise SystemExit(check_sources())
     c = Collector(load_config(), backfill_hours=args.backfill_hours)
+    if args.summarize_backfill:
+        if c.summarizer is None:
+            raise SystemExit("ANTHROPIC_API_KEY가 .env에 없어 요약을 만들 수 없습니다.")
+        total: Counter = Counter()
+        cost = 0.0
+        made = 0
+        while True:
+            out = c.summarize_pending(datetime.now(timezone.utc), limit=8)
+            if not out or not out.get("candidates"):
+                print("요약 상태:", (out or {}).get("status", "ok"))
+                break
+            total.update(out["read"])
+            cost += out["cost_usd"]
+            made += out["summarized"]
+            print(json.dumps(out, ensure_ascii=False))
+        n = sum(total.values())
+        print(f"요약 {made}건, 비용 ${cost:.4f}, 본문 읽기 {dict(total)}"
+              + (f", 못 읽은 비율 {(n - total['ok']) / n:.0%}" if n else ""))
+        c.run_once()  # refresh data/feed.json
+        return
     if args.brief_now:
         if c.briefer is None:
             raise SystemExit("ANTHROPIC_API_KEY가 .env에 없어 브리핑을 만들 수 없습니다.")

@@ -19,7 +19,9 @@ from .classifier import Classifier, rule_tag
 from .feed import write_feed
 from .macro import atomic_write_json, fetch_calendar, fetch_markets
 from .sources import Fetcher, RawItem
-from .store import append_labels, load_events
+from .store import append_labels, append_summaries, load_events
+from .article import ArticleReader
+from .summarize import Summarizer, as_item, needs_summary
 
 log = logging.getLogger("news_feed")
 ROOT = Path(__file__).resolve().parent.parent
@@ -30,6 +32,9 @@ CALENDAR_EVERY = 6 * 3600
 BRIEF_RETRY_EVERY = 900
 RELABEL_PER_POLL = 24      # unclassified items retried per poll
 RELABEL_WINDOW_H = 36      # only items newer than this
+SUMMARY_PER_POLL = 6       # body summaries per poll (pages are read politely, one site at a time)
+SUMMARY_WINDOW_H = 24
+SUMMARY_STOPPED = "요약 멈춤(오늘 상한)"
 
 
 def load_config(env_path: Path = ROOT / ".env") -> dict:
@@ -44,6 +49,7 @@ def load_config(env_path: Path = ROOT / ".env") -> dict:
         "interval": int(env.get("NEWS_FEED_INTERVAL_SEC", "300")),
         "brief_times": [t.strip() for t in env.get("NEWS_FEED_BRIEF_TIMES", "08:20,21:50").split(",") if t.strip()],
         "contact": env.get("NEWS_FEED_CONTACT", "").strip(),  # optional, for BLS' user-agent policy
+        "summary_cap": float(env.get("NEWS_FEED_SUMMARY_USD_CAP", "0.10")),
     }
 
 
@@ -72,7 +78,8 @@ def _load_json(path: Path, default):
 class Collector:
     def __init__(self, cfg: dict, data_dir: Path = DATA, backfill_hours: float = 24.0,
                  fetcher: Fetcher | None = None, classifier: Classifier | None = None,
-                 briefer: Briefer | None = None, macro: bool = True) -> None:
+                 briefer: Briefer | None = None, macro: bool = True,
+                 summarizer: Summarizer | None = None, reader: ArticleReader | None = None) -> None:
         self.cfg = cfg
         self.data_dir = data_dir
         self.events_path = data_dir / "news_events.jsonl"
@@ -86,8 +93,16 @@ class Collector:
         if briefer is None and cfg["api_key"] and self.brief_times:
             briefer = Briefer(cfg["api_key"], self.budget, data_dir, cfg["base_url"],
                               cfg.get("brief_model", "claude-sonnet-5-5"))
+        if summarizer is None and cfg["api_key"]:
+            summarizer = Summarizer(cfg["api_key"], cfg["model"], self.budget, cfg.get("summary_cap", 0.10),
+                                    cfg["base_url"])
         self.classifier = classifier
         self.briefer = briefer
+        self.summarizer = summarizer
+        self.reader = reader or (ArticleReader() if summarizer is not None else None)
+        self.summary_status = "ok"
+        self._sum_stop_day: str | None = None
+        self._sum_tried: set[str] = set()
         self.macro = macro  # markets + calendar (off in unit tests)
         self.markets = _load_json(data_dir / "markets.json", {}).get("items", {})
         self.calendar = _load_json(data_dir / "calendar.json", {}).get("events", [])
@@ -166,6 +181,47 @@ class Collector:
         append_labels(self.data_dir, labels, self.cfg["model"], now.isoformat(timespec="seconds"))
         return f"{len(labels)}/{len(todo)} ${cost:.4f}" + (f" ({stop[:80]})" if stop else "")
 
+    def summarize_pending(self, now: datetime, limit: int = SUMMARY_PER_POLL,
+                          window_h: float = SUMMARY_WINDOW_H) -> dict | None:
+        """Read + summarise important recent articles that have no body_summary yet."""
+        if self.summarizer is None or self.reader is None:
+            return None
+        today = DailyBudget.today()
+        if self._sum_stop_day == today:
+            self.summary_status = SUMMARY_STOPPED
+            return {"status": SUMMARY_STOPPED}
+        since = (now - timedelta(hours=window_h)).isoformat()
+        rows = [r for r in load_events(self.data_dir, 3000)
+                if needs_summary(r) and r["id"] not in self._sum_tried
+                and (r.get("published_at") or r.get("collected_at") or "") >= since]
+        if not rows:
+            self.summary_status = "ok"
+            return None
+        rows.sort(key=lambda r: r.get("published_at") or r.get("collected_at") or "", reverse=True)  # newest first
+        rows.sort(key=lambda r: (-(r.get("importance") or 0), -len(set(r.get("coins") or []) & {"BTC", "XLM"})))
+        rows = rows[:limit]
+        reads: dict[str, int] = {}
+        items = []
+        for r in rows:
+            text, st = self.reader.read(r.get("url") or "")
+            key = st.split(":")[0]
+            reads[key] = reads.get(key, 0) + 1
+            items.append(as_item(r, text))
+            text = ""  # the article text is not kept
+        spent0 = self.summarizer.spent()
+        done, stop = self.summarizer.summarize(items, now)
+        append_summaries(self.data_dir, done)
+        if stop and stop.startswith(SUMMARY_STOPPED):
+            self._sum_stop_day = today
+            self.summary_status = SUMMARY_STOPPED
+            self._sum_tried.update(done)
+        else:
+            self.summary_status = "ok"
+            self._sum_tried.update(r["id"] for r in rows)
+        return {"status": self.summary_status, "candidates": len(rows), "summarized": len(done),
+                "read": reads, "cost_usd": round(self.summarizer.spent() - spent0, 6),
+                "error": stop if stop and not stop.startswith(SUMMARY_STOPPED) else None}
+
     def maybe_brief(self, now: datetime, force_slot: str | None = None) -> str | None:
         if self.briefer is None:
             return None
@@ -241,10 +297,15 @@ class Collector:
             relabel = self.relabel(now)
         except Exception as exc:
             relabel = f"error:{type(exc).__name__}"
+        try:
+            summ = self.summarize_pending(now)
+        except Exception as exc:
+            summ = {"status": f"error:{type(exc).__name__}"}
         brief = self.maybe_brief(now)
         self.status = {**self.status, **status, **slow}
         try:
-            write_feed(self.data_dir, self.markets, self.calendar, self.status, now)
+            write_feed(self.data_dir, self.markets, self.calendar, self.status, now,
+                       summary_status=self.summary_status if self.summarizer else "off")
             feed = "ok"
         except Exception as exc:
             feed = f"error:{type(exc).__name__}"
@@ -252,7 +313,7 @@ class Collector:
             "at": now.isoformat(timespec="seconds"), "sources": status, "slow": slow or None,
             "new": len(uniq), "skipped_old": skipped_old, "classified": len(ai), "cost_usd": round(cost, 6),
             "spent_today_usd": round(self.budget.spent(), 6), "classify_stopped": stop,
-            "relabel": relabel, "brief": brief, "feed": feed,
+            "relabel": relabel, "summarize": summ, "brief": brief, "feed": feed,
         }
         with (self.data_dir / "run_log.jsonl").open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(summary, ensure_ascii=False) + "\n")

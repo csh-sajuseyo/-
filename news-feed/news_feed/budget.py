@@ -68,6 +68,10 @@ class DailyBudget:
     def spent(self) -> float:
         return float(self.day()["usd"])
 
+    def spent_for(self, purpose: str) -> float:
+        """Today's spend for one purpose (classify / brief / summarize), any model."""
+        return sum(float(v["usd"]) for k, v in self.day().get("by_model", {}).items() if k.endswith(f":{purpose}"))
+
     def worst_case(self, est_input_tokens: int, max_output_tokens: int, model: str | None = None) -> float:
         p = PRICES[model or self.model]
         return (est_input_tokens * p["input"] + max_output_tokens * p["output"]) / 1_000_000

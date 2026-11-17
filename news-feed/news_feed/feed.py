@@ -53,11 +53,12 @@ def feed_item(row: dict) -> dict:
         "coins": coins,
         "my_coins": [c for c in coins if c in MY_COINS],
         "classified": classified,
+        "body_summary": row.get("body_summary"),
     }
 
 
 def build_feed(data_dir: Path, markets: dict[str, Any], calendar: list[dict], sources: dict[str, str],
-               now: datetime | None = None) -> dict:
+               now: datetime | None = None, summary_status: str = "off") -> dict:
     now = now or datetime.now(timezone.utc)
     rows = load_events(data_dir, 3000)
     rows.sort(key=lambda r: r.get("published_at") or r.get("collected_at") or "", reverse=True)
@@ -79,9 +80,11 @@ def build_feed(data_dir: Path, markets: dict[str, Any], calendar: list[dict], so
         "calendar_later": later(calendar, now),
         "counts": {"items": len(items), "classified": sum(i["classified"] for i in items),
                    "unclassified": sum(not i["classified"] for i in items),
-                   "important": sum(i["important"] for i in items)},
+                   "important": sum(i["important"] for i in items),
+                   "body_summaries": sum(1 for i in items if i["body_summary"])},
         "items": items,
         "sources": sources,
+        "summary_status": summary_status,
     }
 
 

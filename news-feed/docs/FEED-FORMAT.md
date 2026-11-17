@@ -19,7 +19,8 @@ only the news-feed collector writes it.
 | `markets` | object | `line_ko` (one-line Korean summary, may be `""`) and `items` (by key, see below) |
 | `calendar_7d` | array | scheduled releases/meetings in the next 7 days, oldest first (often empty in a quiet week) |
 | `calendar_later` | array | up to 5 events after those 7 days (within 45 days), same fields — show 「다음 일정」 when `calendar_7d` is empty |
-| `counts` | object | `items`, `classified`, `unclassified`, `important` (numbers among `items`) |
+| `counts` | object | `items`, `classified`, `unclassified`, `important`, `body_summaries` (numbers among `items`) |
+| `summary_status` | string | `ok`, `요약 멈춤(오늘 상한)` (the day's summary cap was reached; resumes after 00:00 KST), or `off` (no key) |
 | `items` | array | the newest **200** news / notices, newest first |
 | `sources` | object | per-source status of the last poll: `"ok:25"`, `"error:..."`, `"fallback:..."` |
 
@@ -44,11 +45,28 @@ only the news-feed collector writes it.
 | `status` | string | `classified` / `unclassified` |
 | `coins` | string[] | tickers the item is about |
 | `my_coins` | string[] | the subset of `coins` in BTC, XLM (for the 「내 코인」 filter) |
+| `body_summary` | object \| null | summary of the article itself (below); `null` until made. Only for important items (importance ≥ 3) and items about BTC/XLM |
 | `classified` | bool | `false` = AI fields are `null` (no key yet, an API error, or the daily cap). The collector retries items from the last 36 h, so an item can turn classified on a later write |
 
 Filters in the tab map directly: 전체 = all; 코인 = `topic=="crypto"`; 세계경제 = `topic=="macro"`;
 거래소 공지 = `topic=="exchange"`; 내 코인 = `my_coins` not empty; **중요한 것만 = `important == true`**
 (unclassified items are always excluded; show them with a grey 「분류 전」 tag in the normal list).
+
+## `items[].body_summary`
+
+Added in the same version 2 (fields were only added; nothing changed or was removed).
+
+| field | meaning |
+|---|---|
+| `points` | 3–5 Korean lines (each ≤ 60 chars) when `basis` is `원문`; 1–2 lines when `제목만` |
+| `numbers` | 0–3 key figures with a short label, e.g. `"BTC 64,800달러 (-3.5%)"`; only numbers found in the article |
+| `basis` | `원문` = made from the article text; `제목만` = the page could not be read (blocked, login/paywall, robots.txt, no text), made from the title / RSS description |
+| `read_at` | UTC time the summary was made |
+
+The text is rewritten, not quoted: no line shares more than 15 consecutive characters with the article,
+and reporter names, captions and ads are left out. The article text itself is never stored.
+UI: show `points` as a list under 「요약」 on the detail screen; with `basis == "제목만"` add a small note
+「원문을 읽지 못해 제목으로 요약」.
 
 ## `markets.items.<key>`
 
@@ -106,3 +124,4 @@ Also appended to `data/briefs.jsonl` (one per line, never rewritten).
 
 - `news_events.jsonl` — every collected item, append-only, never rewritten.
 - `labels.jsonl` — AI labels added later for items that were stored unclassified; merged on read.
+- `summaries.jsonl` — body summaries (`{id, body_summary}`), append-only; merged on read.

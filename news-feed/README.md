@@ -13,6 +13,8 @@ Claude Haiku로 분류하고, 하루 2번(08:20, 21:50 KST) Claude Sonnet으로 
 | `CHECK_SOURCES.cmd` | 모든 소스를 한 번씩 받아 보고 OK / 실패 표시 (아무것도 저장 안 함) |
 | `BRIEF_NOW.cmd` | 지금 바로 브리핑 1건 만들기 (약 $0.03–0.06) |
 
+**본문 요약**: 중요도 3 이상이거나 BTC·XLM 기사는 원문 페이지를 읽어(robots.txt 준수, 같은 사이트 4초 간격, 실패 시 1번만 재시도, 로그인·유료 기사 제외, 앞 3,000자) Haiku로 3~5줄 요약(`body_summary`)을 만든다. 원문은 저장하지 않는다. 요약 몫 하루 상한 `NEWS_FEED_SUMMARY_USD_CAP`(기본 $0.10)을 넘으면 그날은 「요약 멈춤(오늘 상한)」. 지난 24시간 채우기: `.venv\Scripts\python run.py --summarize-backfill`.
+
 비용 한도: `.env`의 `NEWS_FEED_DAILY_USD_CAP` (기본 $2.00, 분류 + 브리핑 합계, 00:00 KST 초기화).
 소스와 고른 이유: `docs/SOURCES.md`.
 
@@ -84,5 +86,6 @@ On the first run, only items published within the last 24 hours are stored (`--b
 - `seen_ids.json` — dedup state
 - `briefs.jsonl` — world-economy briefings (append-only)
 - `feed.json` — read-only summary for the News tab (atomic write) — `docs/FEED-FORMAT.md`
+- `summaries.jsonl` — body summaries of important articles (`body_summary`; article text is never stored)
 - `labels.jsonl` — AI labels added later for items stored unclassified (merged on read)
 - `markets.json`, `markets_history.jsonl`, `calendar.json` — latest indicators (BTC/XLM, FRED, ECB), indicator snapshots, calendar

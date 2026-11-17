@@ -146,7 +146,8 @@ def test_relabel_fills_unclassified_without_rewriting_events(tmp_path):
     assert all(r["classified"] and r["importance"] == 4 and r["why"] == "이유" for r in ev)
     assert col.relabel(NOW) is None  # nothing left
     f = build_feed(tmp_path, {}, [], {}, NOW)
-    assert f["counts"] == {"items": 3, "classified": 3, "unclassified": 0, "important": 3}
+    assert f["counts"] == {"items": 3, "classified": 3, "unclassified": 0, "important": 3,
+                           "body_summaries": 0}
 
 
 def test_failed_batch_does_not_stop_later_batches(tmp_path):
