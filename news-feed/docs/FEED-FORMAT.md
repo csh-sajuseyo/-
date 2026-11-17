@@ -20,7 +20,7 @@ only the news-feed collector writes it.
 | `calendar_7d` | array | scheduled releases/meetings in the next 7 days, oldest first (often empty in a quiet week) |
 | `calendar_later` | array | up to 5 events after those 7 days (within 45 days), same fields — show 「다음 일정」 when `calendar_7d` is empty |
 | `counts` | object | `items`, `classified`, `unclassified`, `important`, `body_summaries` (numbers among `items`) |
-| `summary_status` | string | `ok`, `요약 멈춤(오늘 상한)` (the day's summary cap was reached; resumes after 00:00 KST), or `off` (no key) |
+| `summary_status`, `ai_plus`, `weekly` | | see below |
 | `items` | array | the newest **200** news / notices, newest first |
 | `sources` | object | per-source status of the last poll: `"ok:25"`, `"error:..."`, `"fallback:..."` |
 
@@ -54,19 +54,43 @@ Filters in the tab map directly: 전체 = all; 코인 = `topic=="crypto"`; 세�
 
 ## `items[].body_summary`
 
-Added in the same version 2 (fields were only added; nothing changed or was removed).
+Fields are only ever added (feed `version` stays 2). `format: 2` marks the long form (2026-11-17);
+older summaries have only `points`, `numbers`, `basis`, `read_at`.
 
 | field | meaning |
 |---|---|
-| `points` | 3–5 Korean lines (each ≤ 60 chars) when `basis` is `원문`; 1–2 lines when `제목만` |
-| `numbers` | 0–3 key figures with a short label, e.g. `"BTC 64,800달러 (-3.5%)"`; only numbers found in the article |
-| `basis` | `원문` = made from the article text; `제목만` = the page could not be read (blocked, login/paywall, robots.txt, no text), made from the title / RSS description |
+| `lead` | 3 lines 「무슨 일 · 왜 · 그래서」 (each ≤ 60 chars); 1–2 lines when `basis` is `제목만` |
+| `body` | 6–10 Korean sentences in 2–3 paragraphs separated by a blank line (`"\n\n"`) — enough to skip the article; 1–2 sentences when `제목만` |
+| `numbers` | 0–5 key figures with a short label, e.g. `"BTC 64,800달러 (-3.5%)"`; only numbers found in the article (만·억 ↔ million conversions allowed) |
+| `impact` | 「코인에 주는 뜻」 one line, always ending in `(추정)` |
+| `points` | = `lead` (kept for screens written for format 1) |
+| `basis` | `원문` = from the article text (page or full text in the RSS feed); `제목만` = the page could not be read (blocked 429/405, login/paywall, robots.txt, no text) |
 | `read_at` | UTC time the summary was made |
+| `format` | `2` for the long form |
 
-The text is rewritten, not quoted: no line shares more than 15 consecutive characters with the article,
-and reporter names, captions and ads are left out. The article text itself is never stored.
-UI: show `points` as a list under 「요약」 on the detail screen; with `basis == "제목만"` add a small note
-「원문을 읽지 못해 제목으로 요약」.
+Rules checked in code: no line shares more than 15 consecutive characters with the article, no quotation marks,
+reporter names / captions / ads left out, the article text itself is never stored.
+UI: detail screen = `lead` (bold, 3 lines) → `body` paragraphs → `numbers` → `impact` (grey, with 「추정」);
+with `basis == "제목만"` add 「원문을 읽지 못해 제목으로 요약」.
+
+Which items get one: every classified crypto / world-economy item (exchange notices only when about BTC/XLM),
+except ads, promotions and price-alert / price-prediction pieces; most important first.
+
+## `items[].same_story`
+
+Several articles about the same event are summarised once.
+
+- on the summarised item: `{"count": n, "ids": [other item ids]}` → show 「같은 소식 n건」
+- on the other items: `{"count": n, "of": "<summarised item id>"}`; their `body_summary` is the summarised item's
+  (so every item stays readable). `null` when the article stands alone.
+
+## `summary_status`, `ai_plus`, `weekly`
+
+| field | meaning |
+|---|---|
+| `summary_status` | `ok`; `요약 일부 멈춤(상한 근접: 중요도 N 이상·내 코인만)` near the daily summary cap; `요약 멈춤(오늘 상한)` (resumes 00:00 KST); `요약 멈춤(AI+ 월 한도)`; `off` (AI+ off or no key) |
+| `ai_plus` | `{"on": bool, "month_spent_usd": x, "monthly_limit_usd": y}` (this project's AI+ month, KST) |
+| `weekly` | latest weekly digest or `null`: `{week: "2026-W47", sunday, created_at, model, lines: [5 × {text, refs}], next_week: [≤3 × {date_kst, time_kst, text, refs}], sources: [{ref, title, url, source}], unverified_numbers, cost_usd, batch: true}` — also `data/weekly/YYYY-Www.md` |
 
 ## `markets.items.<key>`
 
@@ -124,4 +148,5 @@ Also appended to `data/briefs.jsonl` (one per line, never rewritten).
 
 - `news_events.jsonl` — every collected item, append-only, never rewritten.
 - `labels.jsonl` — AI labels added later for items that were stored unclassified; merged on read.
-- `summaries.jsonl` — body summaries (`{id, body_summary}`), append-only; merged on read.
+- `summaries.jsonl` — body summaries (`{id, body_summary}`) and same-story links (`{id, same_as}`), append-only; merged on read.
+- `weekly/` — `YYYY-Www.json`, `YYYY-Www.md`, `state.json` (pending batch).

@@ -59,6 +59,7 @@ BINANCE_CATALOGS = {48: "listing", 49: "news", 161: "delisting", 157: "maintenan
 
 NS = {
     "a": "http://www.w3.org/2005/Atom",
+    "content": "http://purl.org/rss/1.0/modules/content/",
     "rss1": "http://purl.org/rss/1.0/",
     "dc": "http://purl.org/dc/elements/1.1/",
 }
@@ -121,7 +122,16 @@ def parse_feed(xml_text: str | bytes, source: str, reliability: float, group: st
     else:
         root = ET.fromstring(xml_text.lstrip("\ufeff \r\n\t"))
 
-    def mk(title, url, date, desc):
+    def mk(title, url, date, desc, full=None):
+        item = _mk(title, url, date, desc)
+        # Full text in the feed (content:encoded / Atom content / a long description) is kept in memory only
+        # (RawItem.extra, never written to disk) and summarised instead of reading the page.
+        raw = full if full and len(full) > len(desc or "") else desc
+        if raw and len(raw) >= 600:
+            item.extra["rss_html"] = raw
+        return item
+
+    def _mk(title, url, date, desc):
         return RawItem(source=source, kind="rss", title=clean_text(title, 300), url=(url or "").strip(),
                        published_at=_parse_date(date or ""), reliability=reliability,
                        group=group, summary=clean_text(desc))
@@ -130,7 +140,7 @@ def parse_feed(xml_text: str | bytes, source: str, reliability: float, group: st
     for node in root.findall("./channel/item")[:80]:  # RSS 2.0
         rows.append(mk(node.findtext("title"), node.findtext("link"),
                        node.findtext("pubDate") or node.findtext("dc:date", namespaces=NS),
-                       node.findtext("description")))
+                       node.findtext("description"), node.findtext("content:encoded", namespaces=NS)))
     if not rows:  # Atom
         for node in root.findall("a:entry", NS)[:80]:
             link = node.find("a:link[@rel='alternate']", NS)
@@ -139,7 +149,7 @@ def parse_feed(xml_text: str | bytes, source: str, reliability: float, group: st
             rows.append(mk(node.findtext("a:title", namespaces=NS),
                            link.attrib.get("href", "") if link is not None else "",
                            node.findtext("a:published", namespaces=NS) or node.findtext("a:updated", namespaces=NS),
-                           node.findtext("a:summary", namespaces=NS)))
+                           node.findtext("a:summary", namespaces=NS), node.findtext("a:content", namespaces=NS)))
     if not rows:  # RSS 1.0 / RDF (Bank of Japan)
         for node in root.findall("rss1:item", NS)[:80]:
             rows.append(mk(node.findtext("rss1:title", namespaces=NS), node.findtext("rss1:link", namespaces=NS),

@@ -4,6 +4,7 @@ Format: docs/FEED-FORMAT.md. Bump FEED_VERSION on breaking changes.
 """
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -54,11 +55,23 @@ def feed_item(row: dict) -> dict:
         "my_coins": [c for c in coins if c in MY_COINS],
         "classified": classified,
         "body_summary": row.get("body_summary"),
+        "same_story": row.get("same_story"),  # {"count": n, "ids": [...]} on the summarised item, {"count", "of"} on others
     }
 
 
+def latest_weekly(data_dir: Path) -> dict | None:
+    d = data_dir / "weekly"
+    files = sorted(d.glob("*-W*.json")) if d.exists() else []
+    for f in reversed(files):
+        try:
+            return json.loads(f.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+    return None
+
+
 def build_feed(data_dir: Path, markets: dict[str, Any], calendar: list[dict], sources: dict[str, str],
-               now: datetime | None = None, summary_status: str = "off") -> dict:
+               now: datetime | None = None, summary_status: str = "off", ai_plus: dict | None = None) -> dict:
     now = now or datetime.now(timezone.utc)
     rows = load_events(data_dir, 3000)
     rows.sort(key=lambda r: r.get("published_at") or r.get("collected_at") or "", reverse=True)
@@ -85,6 +98,8 @@ def build_feed(data_dir: Path, markets: dict[str, Any], calendar: list[dict], so
         "items": items,
         "sources": sources,
         "summary_status": summary_status,
+        "ai_plus": ai_plus or {"on": False},
+        "weekly": latest_weekly(data_dir),
     }
 
 

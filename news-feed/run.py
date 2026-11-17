@@ -6,7 +6,7 @@
     python run.py --report        # status: classified counts, cost per day, importance, top items, last brief
     python run.py --check-sources # try every source once and print ok / error (writes nothing)
     python run.py --brief-now     # make a briefing right now (costs ~$0.03-0.06)
-    python run.py --summarize-backfill  # body summaries for the last 24h of important articles (within the cap)
+    python run.py --summarize-backfill  # body summaries for the last 24h of articles (within the caps)
 """
 from __future__ import annotations
 
@@ -16,7 +16,8 @@ import logging
 import os
 import sys
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from news_feed.store import load_events, read_tail
 from news_feed.budget import KST, DailyBudget
@@ -30,6 +31,14 @@ def _kst(iso: str | None) -> str:
         return datetime.fromisoformat(iso).astimezone(KST).strftime("%m-%d %H:%M")
     except (TypeError, ValueError):
         return "?"
+
+
+def coverage(rows: list[dict], now: datetime) -> tuple[float, int]:
+    """Share of the last 24 h crypto / world-economy articles (exchange notices excluded) that have a body summary."""
+    since = (now - timedelta(hours=24)).isoformat()
+    day = [r for r in rows if (r.get("published_at") or r.get("collected_at") or "") >= since
+           and r.get("group") != "exchange" and r.get("source_kind") not in ("upbit_notice", "binance_notice")]
+    return (sum(1 for r in day if r.get("body_summary")) / len(day) if day else 0.0), len(day)
 
 
 def report(since: str | None = None) -> None:
@@ -57,22 +66,42 @@ def report(since: str | None = None) -> None:
     b = read_tail(DATA / "briefs.jsonl", 1)
     if b:
         print(f"최근 브리핑: {b[-1]['slot']} (모델 {b[-1]['model']}, ${b[-1]['cost_usd']:.4f})")
-    sums = [r for r in rows if r.get("body_summary")]
+    sums = [r for r in rows if r.get("body_summary") and not r.get("same_as")]
     logs_all = read_tail(DATA / "run_log.jsonl", 5000)
     reads: Counter = Counter()
+    by_src: dict[str, Counter] = {}
     for r in logs_all:
-        reads.update((r.get("summarize") or {}).get("read") or {})
+        sm = r.get("summarize") or {}
+        reads.update(sm.get("read") or {})
+        for src, per in (sm.get("read_by_source") or {}).items():
+            by_src.setdefault(src, Counter()).update(per)
     tried = sum(reads.values())
+    cov, n24 = coverage(rows, datetime.now(timezone.utc))
+    print(f"지난 24시간 코인·세계경제 기사 {n24}건 중 본문 요약 있음 {cov:.0%} (목표 70%)")
+    if by_src:
+        print("출처별 본문 읽기:", {k: dict(v) for k, v in sorted(by_src.items())})
+    ai = load_config()
+    if ai.get("shared_dir"):
+        from news_feed.ailedger import SharedLedger
+        led = SharedLedger(Path(ai["shared_dir"]))
+        print(f"AI+ {'켜짐' if ai['ai_plus'] else '꺼짐'} · 이번 달 ${led.month_spent():.2f} / 한도 ${led.monthly_limit():.2f}"
+              f" ({led.path})")
     print(f"본문 요약: {len(sums)}건 (원문 {sum(1 for r in sums if r['body_summary']['basis'] == '원문')}, "
           f"제목만 {sum(1 for r in sums if r['body_summary']['basis'] != '원문')})"
           + (f", 본문 못 읽은 비율 {(tried - reads['ok']) / tried:.0%} ({dict(reads.most_common())})" if tried else ""))
     for r in sorted(sums, key=lambda r: (r.get("importance") or 0, r.get("published_at") or ""), reverse=True)[:2]:
         b = r["body_summary"]
         print(f"  [{r.get('importance')}] {r['source']}: {r.get('summary_ko') or r['title']}  ({b['basis']})")
-        for p in b["points"]:
+        for p in b.get("lead") or b.get("points") or []:
             print(f"     - {p}")
-        if b["numbers"]:
+        if b.get("body"):
+            print("     " + b["body"].replace("\n\n", "\n     "))
+        if b.get("numbers"):
             print(f"     숫자: {' / '.join(b['numbers'])}")
+        if b.get("impact"):
+            print(f"     코인에 주는 뜻: {b['impact']}")
+        if (r.get("same_story") or {}).get("count"):
+            print(f"     같은 소식 {r['same_story']['count']}건")
     stops = Counter((r.get("classify_stopped") or "")[:60] for r in read_tail(DATA / "run_log.jsonl", 2000)
                     if r.get("classify_stopped"))
     if stops:
@@ -139,17 +168,22 @@ def main() -> None:
         cost = 0.0
         made = 0
         while True:
-            out = c.summarize_pending(datetime.now(timezone.utc), limit=8)
+            out = c.summarize_pending(datetime.now(timezone.utc))
             if not out or not out.get("candidates"):
                 print("요약 상태:", (out or {}).get("status", "ok"))
                 break
-            total.update(out["read"])
-            cost += out["cost_usd"]
-            made += out["summarized"]
-            print(json.dumps(out, ensure_ascii=False))
+            total.update(out.get("read") or {})
+            cost += out.get("cost_usd", 0.0)
+            made += out.get("summarized", 0)
+            print(json.dumps({k: v for k, v in out.items() if k != "read_by_source"}, ensure_ascii=False))
+            if out.get("status") != "ok" or not (out.get("summarized") or out.get("same_story_linked")):
+                print("요약 상태:", out.get("status"))
+                break
         n = sum(total.values())
         print(f"요약 {made}건, 비용 ${cost:.4f}, 본문 읽기 {dict(total)}"
               + (f", 못 읽은 비율 {(n - total['ok']) / n:.0%}" if n else ""))
+        cov, n24 = coverage(load_events(DATA, 6000), datetime.now(timezone.utc))
+        print(f"지난 24시간 기사 {n24}건 중 본문 요약 있음 {cov:.0%}")
         c.run_once()  # refresh data/feed.json
         return
     if args.brief_now:

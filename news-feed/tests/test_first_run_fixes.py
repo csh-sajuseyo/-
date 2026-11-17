@@ -176,6 +176,7 @@ def test_all_file_io_names_utf8():
     for p in list((root / "news_feed").glob("*.py")) + list((root / "tests").glob("*.py")) + [root / "run.py"]:
         for n, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1):
             code = line.split("#")[0]
+            code = code.replace("os.open(", "os_open(")  # byte-level file descriptors, no text encoding
             if calls.search(code) and "encoding" not in code and '"rb"' not in code and "calls.search" not in code:
                 bad.append(f"{p.name}:{n}: {line.strip()}")
     assert not bad, "\n".join(bad)

@@ -21,7 +21,11 @@ from .macro import atomic_write_json, fetch_calendar, fetch_markets
 from .sources import Fetcher, RawItem
 from .store import append_labels, append_summaries, load_events
 from .article import ArticleReader
-from .summarize import Summarizer, as_item, needs_summary
+from .ailedger import SharedLedger
+from .article import extract_text
+from .sources import clean_text
+from .summarize import STOPPED as SUMMARY_STOPPED, Summarizer, as_item, needs_summary, same_story
+from .weekly import Weekly
 
 log = logging.getLogger("news_feed")
 ROOT = Path(__file__).resolve().parent.parent
@@ -32,9 +36,11 @@ CALENDAR_EVERY = 6 * 3600
 BRIEF_RETRY_EVERY = 900
 RELABEL_PER_POLL = 24      # unclassified items retried per poll
 RELABEL_WINDOW_H = 36      # only items newer than this
-SUMMARY_PER_POLL = 6       # body summaries per poll (pages are read politely, one site at a time)
+SUMMARY_PER_POLL = 12      # body summaries per poll (pages are read politely, one site at a time)
 SUMMARY_WINDOW_H = 24
-SUMMARY_STOPPED = "요약 멈춤(오늘 상한)"
+SAME_STORY_WINDOW_H = 36
+MONTHLY_STOPPED = "요약 멈춤(AI+ 월 한도)"
+RSS_TEXT_KEEP = 2000       # feed full texts kept in memory (never on disk) until summarised
 
 
 def load_config(env_path: Path = ROOT / ".env") -> dict:
@@ -49,7 +55,11 @@ def load_config(env_path: Path = ROOT / ".env") -> dict:
         "interval": int(env.get("NEWS_FEED_INTERVAL_SEC", "300")),
         "brief_times": [t.strip() for t in env.get("NEWS_FEED_BRIEF_TIMES", "08:20,21:50").split(",") if t.strip()],
         "contact": env.get("NEWS_FEED_CONTACT", "").strip(),  # optional, for BLS' user-agent policy
-        "summary_cap": float(env.get("NEWS_FEED_SUMMARY_USD_CAP", "0.10")),
+        "summary_cap": float(env.get("NEWS_FEED_SUMMARY_USD_CAP", "0.30")),
+        # AI+ : body summaries, briefings and the weekly digest. off = classification only.
+        "ai_plus": env.get("NEWS_AI_PLUS", "on").strip().lower() not in ("off", "0", "false", "no"),
+        "shared_dir": env.get("NEWS_AI_SHARED_DIR", "").strip() or str(ROOT.parent / "_ai"),
+        "weekly_model": env.get("NEWS_FEED_WEEKLY_MODEL", "claude-sonnet-5-5"),
     }
 
 
@@ -79,7 +89,8 @@ class Collector:
     def __init__(self, cfg: dict, data_dir: Path = DATA, backfill_hours: float = 24.0,
                  fetcher: Fetcher | None = None, classifier: Classifier | None = None,
                  briefer: Briefer | None = None, macro: bool = True,
-                 summarizer: Summarizer | None = None, reader: ArticleReader | None = None) -> None:
+                 summarizer: Summarizer | None = None, reader: ArticleReader | None = None,
+                 weekly: Weekly | None = None, shared: SharedLedger | None = None) -> None:
         self.cfg = cfg
         self.data_dir = data_dir
         self.events_path = data_dir / "news_events.jsonl"
@@ -87,20 +98,32 @@ class Collector:
         self.backfill = timedelta(hours=backfill_hours)
         self.fetcher = fetcher or Fetcher(contact=cfg.get("contact", ""))
         self.budget = DailyBudget(data_dir / "cost_ledger.json", cfg["cap"], cfg["model"])
+        self.shared = shared if shared is not None else (
+            SharedLedger(Path(cfg["shared_dir"])) if cfg.get("shared_dir") else None)
+        self.budget.shared = self.shared  # every Claude call is also written to the AI+ shared ledger
         self.brief_times = cfg.get("brief_times", [])
-        if classifier is None and cfg["api_key"]:
-            classifier = Classifier(cfg["api_key"], cfg["model"], self.budget, cfg["base_url"])
-        if briefer is None and cfg["api_key"] and self.brief_times:
-            briefer = Briefer(cfg["api_key"], self.budget, data_dir, cfg["base_url"],
-                              cfg.get("brief_model", "claude-sonnet-5-5"))
-        if summarizer is None and cfg["api_key"]:
-            summarizer = Summarizer(cfg["api_key"], cfg["model"], self.budget, cfg.get("summary_cap", 0.10),
-                                    cfg["base_url"])
+        self.ai_plus = cfg.get("ai_plus", True)
+        key = cfg["api_key"]
+        if classifier is None and key:
+            classifier = Classifier(key, cfg["model"], self.budget, cfg["base_url"])
+        if not self.ai_plus:  # NEWS_AI_PLUS=off: classification only
+            briefer = summarizer = weekly = None
+        else:
+            if briefer is None and key and self.brief_times:
+                briefer = Briefer(key, self.budget, data_dir, cfg["base_url"], cfg.get("brief_model", "claude-sonnet-5-5"))
+            if summarizer is None and key:
+                summarizer = Summarizer(key, cfg["model"], self.budget, cfg.get("summary_cap", 0.30), cfg["base_url"],
+                                        shared=self.shared)
+            if weekly is None and key:
+                weekly = Weekly(key, self.budget, data_dir, cfg["base_url"], cfg.get("weekly_model", "claude-sonnet-5-5"),
+                                shared=self.shared)
         self.classifier = classifier
         self.briefer = briefer
         self.summarizer = summarizer
+        self.weekly = weekly
+        self.rss_text: dict[str, str] = {}
         self.reader = reader or (ArticleReader() if summarizer is not None else None)
-        self.summary_status = "ok"
+        self.summary_status = "ok" if summarizer is not None else "off"
         self._sum_stop_day: str | None = None
         self._sum_tried: set[str] = set()
         self.macro = macro  # markets + calendar (off in unit tests)
@@ -181,50 +204,92 @@ class Collector:
         append_labels(self.data_dir, labels, self.cfg["model"], now.isoformat(timespec="seconds"))
         return f"{len(labels)}/{len(todo)} ${cost:.4f}" + (f" ({stop[:80]})" if stop else "")
 
+    def _monthly_ok(self) -> bool:
+        return self.shared is None or self.shared.month_spent() < self.shared.monthly_limit()
+
     def summarize_pending(self, now: datetime, limit: int = SUMMARY_PER_POLL,
                           window_h: float = SUMMARY_WINDOW_H) -> dict | None:
-        """Read + summarise important recent articles that have no body_summary yet."""
+        """Read + summarise recent classified articles that have no body_summary yet, most important first.
+        Articles about a story that already has (or gets, in this run) a summary are linked to it instead."""
         if self.summarizer is None or self.reader is None:
             return None
         today = DailyBudget.today()
         if self._sum_stop_day == today:
             self.summary_status = SUMMARY_STOPPED
             return {"status": SUMMARY_STOPPED}
+        if not self._monthly_ok():
+            self.summary_status = MONTHLY_STOPPED
+            return {"status": MONTHLY_STOPPED}
+        events = load_events(self.data_dir, 3000)
         since = (now - timedelta(hours=window_h)).isoformat()
-        rows = [r for r in load_events(self.data_dir, 3000)
-                if needs_summary(r) and r["id"] not in self._sum_tried
-                and (r.get("published_at") or r.get("collected_at") or "") >= since]
+        since_story = (now - timedelta(hours=SAME_STORY_WINDOW_H)).isoformat()
+        when = lambda r: r.get("published_at") or r.get("collected_at") or ""  # noqa: E731
+        reps = [r for r in events if r.get("body_summary") and not r.get("same_as") and when(r) >= since_story]
+        rows = [r for r in events if needs_summary(r) and r["id"] not in self._sum_tried and when(r) >= since]
         if not rows:
             self.summary_status = "ok"
             return None
-        rows.sort(key=lambda r: r.get("published_at") or r.get("collected_at") or "", reverse=True)  # newest first
+        rows.sort(key=when, reverse=True)  # newest first, then by importance / my coins (stable)
         rows.sort(key=lambda r: (-(r.get("importance") or 0), -len(set(r.get("coins") or []) & {"BTC", "XLM"})))
-        rows = rows[:limit]
-        reads: dict[str, int] = {}
-        items = []
+        chosen: list[dict] = []
+        links: dict[str, str] = {}
         for r in rows:
-            text, st = self.reader.read(r.get("url") or "")
+            rep = next((x for x in reps + chosen if x["id"] != r["id"] and same_story(r, x)), None)
+            if rep is not None:
+                links[r["id"]] = rep["id"]
+            elif len(chosen) < limit:
+                chosen.append(r)
+        reads: dict[str, dict[str, int]] = {}
+        items = []
+        for r in chosen:
+            text, st = self.rss_text.get(r["id"], ""), "rss"
+            if not text:
+                text, st = self.reader.read(r.get("url") or "")
             key = st.split(":")[0]
-            reads[key] = reads.get(key, 0) + 1
+            src = reads.setdefault(r.get("source") or "?", {})
+            src[key] = src.get(key, 0) + 1
             items.append(as_item(r, text))
             text = ""  # the article text is not kept
         spent0 = self.summarizer.spent()
         done, stop = self.summarizer.summarize(items, now)
-        append_summaries(self.data_dir, done)
+        # a link only counts once its representative has (or will get) a summary
+        keep_links = {d: rep for d, rep in links.items() if rep in done or any(x["id"] == rep for x in reps)}
+        append_summaries(self.data_dir, done, keep_links)
+        for i in done:
+            self.rss_text.pop(i, None)
         if stop and stop.startswith(SUMMARY_STOPPED):
             self._sum_stop_day = today
-            self.summary_status = SUMMARY_STOPPED
+            self.summary_status = SUMMARY_STOPPED if "monthly" not in stop else MONTHLY_STOPPED
+            self._sum_tried.update(done)
+        elif stop and stop.startswith("요약 일부 멈춤"):
+            self.summary_status = stop
             self._sum_tried.update(done)
         else:
             self.summary_status = "ok"
-            self._sum_tried.update(r["id"] for r in rows)
-        return {"status": self.summary_status, "candidates": len(rows), "summarized": len(done),
-                "read": reads, "cost_usd": round(self.summarizer.spent() - spent0, 6),
-                "error": stop if stop and not stop.startswith(SUMMARY_STOPPED) else None}
+            self._sum_tried.update(r["id"] for r in chosen)
+        total = {}
+        for per in reads.values():
+            for k, v in per.items():
+                total[k] = total.get(k, 0) + v
+        return {"status": self.summary_status, "candidates": len(rows), "chosen": len(chosen),
+                "summarized": len(done), "same_story_linked": len(keep_links), "read": total,
+                "read_by_source": reads, "cost_usd": round(self.summarizer.spent() - spent0, 6),
+                "error": stop if stop and not stop.startswith(("요약 멈춤", "요약 일부 멈춤")) else None}
+
+    def maybe_weekly(self, now: datetime) -> str | None:
+        if self.weekly is None:
+            return None
+        try:
+            return self.weekly.tick(now, load_events, self.calendar)
+        except Exception as exc:
+            log.warning("weekly failed: %s", exc)
+            return f"error:{type(exc).__name__}: {str(exc)[:160]}"
 
     def maybe_brief(self, now: datetime, force_slot: str | None = None) -> str | None:
         if self.briefer is None:
             return None
+        if not self._monthly_ok():
+            return "skipped: AI+ monthly limit"
         slot = force_slot or slot_due(now, self.brief_times, self.briefer.done_slots())
         if not slot:
             return None
@@ -263,6 +328,14 @@ class Collector:
                 skipped_old += 1
         # same id can appear twice in one poll (e.g. a Binance notice in two catalogs)
         uniq = list({it.id: it for it in new}.values())
+        for it in uniq:  # feed full text: memory only, used by the summariser instead of reading the page
+            raw = it.extra.get("rss_html")
+            if raw:
+                txt = extract_text(raw) or clean_text(raw, 3000)
+                if len(txt) >= 600:
+                    self.rss_text[it.id] = txt[:3000]
+        while len(self.rss_text) > RSS_TEXT_KEEP:
+            self.rss_text.pop(next(iter(self.rss_text)))
 
         if self.classifier is None:
             ai, cost, stop = {}, 0.0, "no api key"
@@ -302,10 +375,12 @@ class Collector:
         except Exception as exc:
             summ = {"status": f"error:{type(exc).__name__}"}
         brief = self.maybe_brief(now)
+        weekly = self.maybe_weekly(now)
         self.status = {**self.status, **status, **slow}
         try:
             write_feed(self.data_dir, self.markets, self.calendar, self.status, now,
-                       summary_status=self.summary_status if self.summarizer else "off")
+                       summary_status=self.summary_status if self.summarizer else "off",
+                       ai_plus={"on": self.ai_plus, **(self.shared.status() if self.shared else {})})
             feed = "ok"
         except Exception as exc:
             feed = f"error:{type(exc).__name__}"
@@ -313,7 +388,7 @@ class Collector:
             "at": now.isoformat(timespec="seconds"), "sources": status, "slow": slow or None,
             "new": len(uniq), "skipped_old": skipped_old, "classified": len(ai), "cost_usd": round(cost, 6),
             "spent_today_usd": round(self.budget.spent(), 6), "classify_stopped": stop,
-            "relabel": relabel, "summarize": summ, "brief": brief, "feed": feed,
+            "relabel": relabel, "summarize": summ, "brief": brief, "weekly": weekly, "feed": feed,
         }
         with (self.data_dir / "run_log.jsonl").open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(summary, ensure_ascii=False) + "\n")

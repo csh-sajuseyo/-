@@ -48,6 +48,7 @@ class DailyBudget:
         self.cap = cap_usd
         self.model = model  # default model for calls that don't name one
         self._lock = threading.Lock()
+        self.shared = None  # AI+ shared ledger (ailedger.SharedLedger); every call is copied there too
 
     @staticmethod
     def today() -> str:
@@ -81,9 +82,9 @@ class DailyBudget:
         """True only if even a worst-case call stays within today's cap (minus `reserve`)."""
         return self.spent() + self.worst_case(est_input_tokens, max_output_tokens, model) <= self.cap - reserve
 
-    def record(self, usage, model: str | None = None, purpose: str = "classify") -> float:
+    def record(self, usage, model: str | None = None, purpose: str = "classify", batch: bool = False) -> float:
         model = model or self.model
-        cost = usage_cost(model, usage)
+        cost = usage_cost(model, usage) * (0.5 if batch else 1.0)  # Message Batches: half price
         with self._lock:
             data = self._load()
             d = {**_empty(), **data.get(self.today(), {})}
@@ -99,4 +100,9 @@ class DailyBudget:
             tmp = self.path.with_suffix(".tmp")
             tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
             tmp.replace(self.path)
+        if self.shared is not None:
+            try:
+                self.shared.append(purpose, model, usage, cost, batch)
+            except OSError:
+                pass  # the shared ledger must never stop collection
         return cost

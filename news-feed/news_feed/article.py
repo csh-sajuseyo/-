@@ -47,13 +47,44 @@ BOILER = re.compile(
 YNA_LEAD = re.compile(r"^\([^)]{1,30}=\s*연합뉴스\)\s*(\S+\s+){0,3}?\S*\s*(기자|특파원)\s*=\s*")
 
 
+# Where the article body sits on the sites we read (class / id / data-component patterns).
+# A site rule only narrows the search; if it finds too little text the generic extraction is used.
+SITE_RULES: dict[str, re.Pattern] = {
+    "yna.co.kr": re.compile(r"story-news|article-txt|articleWrap", re.I),
+    "coindesk.com": re.compile(r"document-body|article-body|at-body|articleBody", re.I),
+    "cointelegraph.com": re.compile(r"post-content|post__content|article__body", re.I),
+    "decrypt.co": re.compile(r"post-content|article-body|prose", re.I),
+    "cnbc.com": re.compile(r"ArticleBody-articleBody|group", re.I),
+    "bbc.co.uk": re.compile(r"text-block|article-body|story-body", re.I),
+    "bbc.com": re.compile(r"text-block|article-body|story-body", re.I),
+    "federalreserve.gov": re.compile(r"\barticle\b|col-md-8", re.I),
+    "ecb.europa.eu": re.compile(r"\bsection\b|ecb-pressContent|main-wrapper", re.I),
+    "boj.or.jp": re.compile(r"\bmain\b|outline|contents", re.I),
+    "bok.or.kr": re.compile(r"dbdata|bd-view|view-cont|viewCont|bbsView", re.I),
+    "bls.gov": re.compile(r"\bbodytext\b|main-content|normalnews", re.I),
+    "bea.gov": re.compile(r"field--name-body|release-body|node__content", re.I),
+}
+BLOCK_TAGS = {"p", "div", "li", "td", "th", "tr", "section", "article", "main", "h1", "h2", "h3", "h4", "h5", "h6",
+              "blockquote", "dd", "dt", "table", "ul", "ol"}
+
+
+def site_rule(host: str | None) -> re.Pattern | None:
+    host = (host or "").lower()
+    return next((v for k, v in SITE_RULES.items() if host == k or host.endswith("." + k)), None)
+
+
 class _Paragraphs(HTMLParser):
-    def __init__(self) -> None:
+    def __init__(self, focus: re.Pattern | None = None) -> None:
         super().__init__(convert_charrefs=True)
         self.stack: list[bool] = []  # True = inside something we skip
+        self.fstack: list[bool] = []  # True = inside the site's article container
+        self.focus = focus
         self.in_p = 0
+        self.in_pre = 0
         self.buf: list[str] = []
-        self.paras: list[str] = []
+        self.paras: list[tuple[str, bool]] = []  # (text, inside site container)
+        self.blocks: list[str] = [""]  # text split at block tags (fallback for pages without <p>)
+        self.pres: list[str] = []
         self.ld: list[str] = []
         self._ld = False
 
@@ -66,11 +97,19 @@ class _Paragraphs(HTMLParser):
             self._ld = True
             self.ld.append("")
         if tag in VOID:
-            if tag == "br" and self.in_p:
-                self.buf.append(" ")
+            if tag == "br":
+                if self.in_p:
+                    self.buf.append(" ")
+                self.blocks.append("")
             return
-        cls = f"{a.get('class') or ''} {a.get('id') or ''} {a.get('role') or ''}"
+        cls = f"{a.get('class') or ''} {a.get('id') or ''} {a.get('role') or ''} {a.get('data-component') or ''}"
         self.stack.append(tag in SKIP_TAGS or bool(SKIP_CLASS.search(cls)) or a.get("aria-hidden") == "true")
+        self.fstack.append(bool(self.focus and self.focus.search(cls)))
+        if tag in BLOCK_TAGS:
+            self.blocks.append("")
+        if tag == "pre" and not self._skipping():
+            self.in_pre += 1
+            self.pres.append("")
         if tag == "p" and not self._skipping():
             self.in_p += 1
             self.buf = []
@@ -84,16 +123,29 @@ class _Paragraphs(HTMLParser):
             self.in_p -= 1
             text = re.sub(r"\s+", " ", "".join(self.buf)).strip()
             if text:
-                self.paras.append(text)
+                self.paras.append((text, any(self.fstack)))
             self.buf = []
+        if tag == "pre" and self.in_pre:
+            self.in_pre -= 1
+        if tag in BLOCK_TAGS:
+            self.blocks.append("")
         if self.stack:
             self.stack.pop()
+        if self.fstack:
+            self.fstack.pop()
 
     def handle_data(self, data):
         if self._ld:
             self.ld[-1] += data
-        elif self.in_p and not self._skipping():
+            return
+        if self._skipping():
+            return
+        if self.in_pre:
+            self.pres[-1] += data
+            return
+        if self.in_p:
             self.buf.append(data)
+        self.blocks[-1] += data
 
 
 def _sentence_like(p: str) -> bool:
@@ -133,9 +185,26 @@ class Paywalled(Exception):
     pass
 
 
-def extract_text(html_text: str, limit: int = MAX_CHARS) -> str:
-    """Main article text (plain, single-spaced paragraphs), at most `limit` characters. '' if none found."""
-    parser = _Paragraphs()
+def _keep(paras) -> list[str]:
+    keep: list[str] = []
+    for p in paras:
+        p = _clean(re.sub(r"\s+", " ", p).strip())
+        if not _sentence_like(p) or BOILER.search(p):
+            continue
+        if keep and p == keep[-1]:
+            continue
+        keep.append(p)
+    return keep
+
+
+def extract_text(html_text: str, limit: int = MAX_CHARS, host: str | None = None) -> str:
+    """Main article text (plain, one paragraph per line), at most `limit` characters. '' if none found.
+
+    Order: JSON-LD articleBody -> <p> inside the site's article container -> all <p> -> <pre> blocks
+    (BLS releases) -> text split at block tags (boards without <p>, e.g. BOK). The longest clean result wins
+    among the last three.
+    """
+    parser = _Paragraphs(site_rule(host))
     parser.feed(html_text)
     parser.close()
     body = ""
@@ -147,19 +216,33 @@ def extract_text(html_text: str, limit: int = MAX_CHARS) -> str:
             if isinstance(ab, str) and len(ab) > len(body):
                 body = ab
     if len(body) >= 300:
-        paras = [p for p in re.split(r"\n+|(?<=[.!?다])\s{2,}", htmllib.unescape(body))]
+        keep = _keep(re.split(r"\n+|(?<=[.!?다])\s{2,}", htmllib.unescape(body)))
+        if len("".join(keep)) >= 300:
+            return "\n".join(keep)[:limit].rstrip()
+    focus = _keep(p for p, inside in parser.paras if inside)
+    if len("".join(focus)) >= 300:
+        return "\n".join(focus)[:limit].rstrip()
+    cands = [_keep(p for p, _ in parser.paras)]
+    pre_paras = [" ".join(x.split()) for pre in parser.pres for x in re.split(r"\n\s*\n", pre)]
+    cands.append(_keep(pre_paras))
+    cands.append(_keep(parser.blocks))
+    best = max(cands, key=lambda k: len("".join(k)))
+    return "\n".join(best)[:limit].rstrip()
+
+
+def decode_html(content: bytes, header_encoding: str | None, ctype: str) -> str:
+    """Charset from the header, else from <meta charset> (Korean sites may use EUC-KR), else UTF-8."""
+    if header_encoding and "charset" in (ctype or "").lower():
+        enc = header_encoding
     else:
-        paras = parser.paras
-    keep = []
-    for p in paras:
-        p = _clean(re.sub(r"\s+", " ", p).strip())
-        if not _sentence_like(p) or BOILER.search(p):
-            continue
-        if keep and p == keep[-1]:
-            continue
-        keep.append(p)
-    text = "\n".join(keep)
-    return text[:limit].rstrip()
+        m = re.search(rb"charset=[\"']?([A-Za-z0-9_-]+)", content[:4000])
+        enc = m.group(1).decode("ascii", "ignore") if m else "utf-8"
+    if enc.lower() in ("euc-kr", "ks_c_5601-1987", "ksc5601"):
+        enc = "cp949"
+    try:
+        return content.decode(enc, "replace")
+    except LookupError:
+        return content.decode("utf-8", "replace")
 
 
 UPBIT_NOTICE = re.compile(r"https://upbit\.com/service_center/notice\?id=(\d+)")
@@ -252,8 +335,7 @@ class ArticleReader:
             if "html" not in ctype:
                 return "", "error:not-html"
             try:
-                text = extract_text(r.content.decode(r.encoding if r.encoding and "charset" in ctype else "utf-8",
-                                                     "replace"))
+                text = extract_text(decode_html(r.content, r.encoding, ctype), host=urlsplit(r.url or url).netloc)
             except Paywalled:
                 return "", "paywall"
             return (text, "ok") if len(text) >= 200 else ("", "empty")

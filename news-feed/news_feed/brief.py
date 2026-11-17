@@ -200,6 +200,9 @@ class Briefer:
         payload, refs = build_inputs(events, markets, calendar, now)
         text = json.dumps(payload, ensure_ascii=False)
         est_in = 1200 + len(text) // 2  # Korean-heavy JSON: ~2 chars per token is a safe over-estimate
+        shared = getattr(self.budget, "shared", None)
+        if shared is not None and not shared.allows(self.budget.worst_case(est_in, MAX_TOKENS, self.model)):
+            raise RuntimeError("AI+ monthly limit reached")
         if not self.budget.allows(est_in, MAX_TOKENS, self.model):
             raise RuntimeError(f"daily cap ${self.budget.cap:.2f} would be exceeded (spent ${self.budget.spent():.4f})")
         resp = self.client.beta.messages.create(

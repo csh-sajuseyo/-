@@ -13,7 +13,11 @@ Claude Haiku로 분류하고, 하루 2번(08:20, 21:50 KST) Claude Sonnet으로 
 | `CHECK_SOURCES.cmd` | 모든 소스를 한 번씩 받아 보고 OK / 실패 표시 (아무것도 저장 안 함) |
 | `BRIEF_NOW.cmd` | 지금 바로 브리핑 1건 만들기 (약 $0.03–0.06) |
 
-**본문 요약**: 중요도 3 이상이거나 BTC·XLM 기사는 원문 페이지를 읽어(robots.txt 준수, 같은 사이트 4초 간격, 실패 시 1번만 재시도, 로그인·유료 기사 제외, 앞 3,000자) Haiku로 3~5줄 요약(`body_summary`)을 만든다. 원문은 저장하지 않는다. 요약 몫 하루 상한 `NEWS_FEED_SUMMARY_USD_CAP`(기본 $0.10)을 넘으면 그날은 「요약 멈춤(오늘 상한)」. 지난 24시간 채우기: `.venv\Scripts\python run.py --summarize-backfill`.
+**본문 요약**: 분류된 코인·세계경제 기사 전부(광고·가격 알림 제외, 거래소 공지는 BTC·XLM만)를 중요도 높은 순으로, 5분마다 12건씩 원문 페이지를 읽어(robots.txt 준수, 같은 사이트 4초 간격, 실패 시 1번만 재시도, 로그인·유료·차단 사이트 제외, 앞 3,000자; RSS에 본문이 있으면 그것 먼저) Haiku로 읽을거리를 만든다: `lead` 3줄 · `body` 6~10문장 · `numbers` 0~5개 · `impact`(추정). 같은 사건 기사는 한 번만 요약하고 「같은 소식 n건」으로 묶는다. 원문은 저장하지 않는다. 요약 하루 상한 `NEWS_FEED_SUMMARY_USD_CAP`(기본 $0.30) — 상한이 가까우면 중요도 낮은 것부터 멈춘다. 지난 24시간 채우기: `.venv\Scripts\python run.py --summarize-backfill`.
+
+**AI+** (`NEWS_AI_PLUS=on`, 기본): 본문 요약·브리핑·주간 정리. `off`면 분류만 한다. 모든 Claude 호출은 `cost_ledger.json`과 함께 공용 장부 `C:\CodexProjects\_ai\ledger.jsonl`에도 한 줄씩 남고, `_ai\limits.json`의 `"news-feed"` 월 한도(기본 $15)에 닿으면 요약·브리핑·주간 정리만 멈춘다(수집·분류는 계속).
+
+**주간 정리**: 일요일 08:30 KST, Sonnet 5.5 Batch(반값). 지난 7일 중요도 3 이상 기사의 요약으로 「이번 주 5줄 + 다음 주 볼 일정 3개」 → `feed.json`의 `weekly`, `data\weekly\YYYY-Www.md`. PC가 꺼져 있었으면 월요일 08:30까지 만든다.
 
 비용 한도: `.env`의 `NEWS_FEED_DAILY_USD_CAP` (기본 $2.00, 분류 + 브리핑 합계, 00:00 KST 초기화).
 소스와 고른 이유: `docs/SOURCES.md`.

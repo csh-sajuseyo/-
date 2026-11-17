@@ -34,36 +34,58 @@ def load_labels(data_dir: Path) -> dict[str, dict]:
     return {r["id"]: r for r in read_tail(data_dir / "labels.jsonl", 10**6) if r.get("id")}
 
 
-def load_summaries(data_dir: Path) -> dict[str, dict]:
-    return {r["id"]: r["body_summary"] for r in read_tail(data_dir / "summaries.jsonl", 10**6)
-            if r.get("id") and r.get("body_summary")}
+def load_summaries(data_dir: Path) -> tuple[dict[str, dict], dict[str, str]]:
+    """({id: body_summary}, {duplicate id: representative id}) from summaries.jsonl."""
+    sums: dict[str, dict] = {}
+    links: dict[str, str] = {}
+    for r in read_tail(data_dir / "summaries.jsonl", 10**6):
+        if not r.get("id"):
+            continue
+        if r.get("body_summary"):
+            sums[r["id"]] = r["body_summary"]
+        elif r.get("same_as"):
+            links[r["id"]] = r["same_as"]
+    return sums, links
 
 
 def load_events(data_dir: Path, n: int = 3000) -> list[dict]:
     rows = read_tail(data_dir / "news_events.jsonl", n)
     labels = load_labels(data_dir)
-    sums = load_summaries(data_dir)
-    if not labels and not sums:
+    sums, links = load_summaries(data_dir)
+    if not labels and not sums and not links:
         return rows
+    groups: dict[str, list[str]] = {}
+    for dup, rep in links.items():
+        groups.setdefault(rep, []).append(dup)
     out = []
     for r in rows:
         lab = labels.get(r.get("id"))
         if lab and not r.get("classified"):
             r = {**r, **{k: lab.get(k) for k in LABEL_FIELDS}, "classified": True,
                  "model": lab.get("model"), "labelled_at": lab.get("labelled_at")}
-        if r.get("id") in sums:
-            r = {**r, "body_summary": sums[r["id"]]}
+        rid = r.get("id")
+        if rid in sums:
+            r = {**r, "body_summary": sums[rid]}
+        if rid in groups:  # representative of a story covered by several articles
+            r = {**r, "same_story": {"count": 1 + len(groups[rid]), "ids": groups[rid]}}
+        if rid in links:  # duplicate: reads the representative's summary
+            rep = links[rid]
+            r = {**r, "same_as": rep, "body_summary": sums.get(rep),
+                 "same_story": {"count": 1 + len(groups.get(rep, [])), "of": rep}}
         out.append(r)
     return out
 
 
-def append_summaries(data_dir: Path, summaries: dict[str, dict]) -> None:
-    if not summaries:
+def append_summaries(data_dir: Path, summaries: dict[str, dict], same_as: dict[str, str] | None = None) -> None:
+    """Append body summaries and same-story links ({duplicate id: representative id})."""
+    if not summaries and not same_as:
         return
     data_dir.mkdir(parents=True, exist_ok=True)
     with (data_dir / "summaries.jsonl").open("a", encoding="utf-8") as fh:
         for item_id, s in summaries.items():
             fh.write(json.dumps({"id": item_id, "body_summary": s}, ensure_ascii=False) + "\n")
+        for dup, rep in (same_as or {}).items():
+            fh.write(json.dumps({"id": dup, "same_as": rep}, ensure_ascii=False) + "\n")
 
 
 def append_labels(data_dir: Path, labels: dict[str, dict], model: str, at: str) -> None:

@@ -1,7 +1,9 @@
 # One-click update of C:\CodexProjects\news-feed from the GitHub branch (double-click UPDATE_NEWS_FEED.cmd).
 #   1. If this folder's git repo has no commit yet, commits the current state first (".env" and "data\" stay out).
 #   2. Stops the hidden collector, copies the new code in (never touches .env, data\, .venv\).
-#   3. Installs requirements, sets NEWS_FEED_DAILY_USD_CAP=2.00 in .env (the key is not read or printed).
+#   3. Installs requirements, sets NEWS_FEED_DAILY_USD_CAP=2.00 and NEWS_FEED_SUMMARY_USD_CAP=0.30 in .env
+#      (the key is not read or printed).
+#   5. Turns on "run as soon as possible after a missed start" for the scheduled task "NewsFeed Watchdog" only.
 #   4. Commits the update, checks every source once, starts the hidden collector again.
 # It does not push anywhere and does not create a remote.
 param(
@@ -53,8 +55,11 @@ $lines = [IO.File]::ReadAllLines((Join-Path $here ".env"))
 $found = $false
 $lines = $lines | ForEach-Object { if ($_ -match '^\s*NEWS_FEED_DAILY_USD_CAP\s*=') { $found = $true; "NEWS_FEED_DAILY_USD_CAP=2.00" } else { $_ } }
 if (-not $found) { $lines = @($lines) + "NEWS_FEED_DAILY_USD_CAP=2.00" }
+$found = $false
+$lines = $lines | ForEach-Object { if ($_ -match '^\s*NEWS_FEED_SUMMARY_USD_CAP\s*=') { $found = $true; "NEWS_FEED_SUMMARY_USD_CAP=0.30" } else { $_ } }
+if (-not $found) { $lines = @($lines) + "NEWS_FEED_SUMMARY_USD_CAP=0.30" }
 [IO.File]::WriteAllLines((Join-Path $here ".env"), [string[]]$lines, (New-Object Text.UTF8Encoding($false)))
-Write-Host "daily cap set to `$2.00 in .env"
+Write-Host "daily cap `$2.00, summary cap `$0.30 set in .env (NEWS_AI_PLUS stays as you set it; default on)"
 
 # BLS (US CPI / jobs schedule) refuses anonymous scripts: it wants a contact e-mail in the request.
 # Asked once; stored only in .env (git-ignored). Press Enter to skip.
@@ -70,10 +75,26 @@ if (-not $hasContact) {
 }
 
 # 4. commit, check, start
-Commit-All "World-economy sources, macro classification, briefings, feed.json"
+Commit-All "Update news-feed from claude/wonderful-hawking-86v0bn"
 & .\.venv\Scripts\python.exe -m pytest -q tests
 & .\.venv\Scripts\python.exe run.py --check-sources
 & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here "START_HIDDEN.ps1")
+
+# 5. Scheduled task "NewsFeed Watchdog" only: run as soon as possible after a missed start (PC was off /
+#    asleep), so the collector does not stay down for hours after a restart. No other task is touched.
+try {
+    $wd = Get-ScheduledTask -TaskName "NewsFeed Watchdog" -ErrorAction Stop
+    if (-not $wd.Settings.StartWhenAvailable) {
+        $set = $wd.Settings
+        $set.StartWhenAvailable = $true
+        Set-ScheduledTask -TaskName $wd.TaskName -TaskPath $wd.TaskPath -Settings $set -ErrorAction Stop | Out-Null
+        Write-Host "NewsFeed Watchdog: StartWhenAvailable turned on"
+    } else {
+        Write-Host "NewsFeed Watchdog: StartWhenAvailable already on"
+    }
+} catch {
+    Write-Host "NewsFeed Watchdog: not changed ($($_.Exception.Message)). If it says access denied, run this script once as administrator."
+}
 Write-Host ""
 Write-Host "git remote:"; git remote -v
 Write-Host "done."

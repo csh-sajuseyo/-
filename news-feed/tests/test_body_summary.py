@@ -10,7 +10,8 @@ from news_feed.budget import DailyBudget
 from news_feed.collector import SUMMARY_STOPPED, Collector
 from news_feed.feed import build_feed
 from news_feed.store import load_events
-from news_feed.summarize import Summarizer, clean_summary, copied_run, format_problems, needs_summary
+from news_feed.summarize import (Summarizer, clean_summary, copied_run, format_problems, min_importance,
+                                 needs_summary, same_story, sentences)
 
 S1 = "The central bank kept its policy rate unchanged at the meeting held this week in the capital city."
 S2 = "Officials said inflation is still above target and that further moves will depend on the coming data."
@@ -140,22 +141,47 @@ def test_reader_login_redirect_and_upbit_api():
 SRC = f"{S1} {S2} {S3} The rate is 4.25% and the next meeting is on 17 December."
 
 
-def test_clean_summary_format_rules():
-    raw = {"points": ["중앙은행이 이번 주 회의에서 정책금리를 그대로 유지함",
-                      "“물가가 아직 목표보다 높다”고 당국자들이 밝힘",
-                      "The central bank kept its policy rate unchanged",  # copied run -> dropped
-                      "시장은 이 결정을 대체로 예상했고 채권 금리 변화도 작았다고 보도되었으며 다음 회의는 12월로 예정되어 있어 시장의 관심이 모인다",
-                      "다음 회의는 12월 17일", "a", "b"],
-           "numbers": ["정책금리 4.25%", "다음 회의 12월 17일", "지어낸 숫자 9.99%", "넷째 1", "다섯째 2"]}
-    s = {**clean_summary(raw, SRC, "원문"), "basis": "원문"}
-    assert not any(copied_run(p, SRC) for p in s["points"])
-    assert all(len(p) <= 60 for p in s["points"]) and 3 <= len(s["points"]) <= 5
-    assert all("“" not in p for p in s["points"])  # quotation marks removed
-    assert "지어낸 숫자 9.99%" not in s["numbers"] and len(s["numbers"]) <= 3
+BODY_OK = ("중앙은행이 이번 주 회의에서 정책금리를 4.25%로 묶어 두었다. 시장 대부분이 예상한 결과였다. "
+           "당국자들은 물가가 아직 목표보다 높다고 설명했다.\n\n"
+           "앞으로의 조정은 새로 나오는 지표를 보고 정하겠다고 밝혔다. 발표 뒤 채권 금리는 크게 움직이지 않았다. "
+           "다음 회의는 12월 17일로 잡혀 있다.")
+
+
+def v2_raw(**kw):
+    raw = {"lead": ["중앙은행이 정책금리를 그대로 유지함", "물가가 아직 목표보다 높기 때문", "다음 조정은 지표를 보고 결정 예정"],
+           "body": BODY_OK, "numbers": ["정책금리 4.25%", "다음 회의 17일"],
+           "impact": "금리 인하 기대가 늦춰져 BTC에는 부담"}
+    return {**raw, **kw}
+
+
+def test_v2_format_ok_and_v1_fields_kept():
+    s = {**clean_summary(v2_raw(), SRC, "원문"), "basis": "원문"}
     assert format_problems(s, SRC) == []
-    t = {**clean_summary({"points": ["한 줄", "두 줄", "세 줄"], "numbers": []}, "title", "제목만"), "basis": "제목만"}
-    assert len(t["points"]) == 2 and format_problems(t, "title") == []
-    assert format_problems({"basis": "원문", "points": ["하나"], "numbers": []}, SRC) == ["points 1 not in 3-5"]
+    assert len(s["lead"]) == 3 and s["points"] == s["lead"]  # v1 field kept for old screens
+    assert s["impact"].endswith("(추정)") and s["numbers"] == ["정책금리 4.25%", "다음 회의 17일"]
+    assert 6 <= len(sentences(s["body"])) <= 10 and s["body"].count("\n\n") == 1
+
+
+def test_v2_rules_enforced():
+    long_body = BODY_OK + "\n\n" + " ".join(f"추가 설명 문장 {i}번입니다." for i in range(9))
+    raw = v2_raw(lead=["“물가가 아직 목표보다 높다”고 당국자들이 밝힘", "The central bank kept its policy rate unchanged",
+                       "가" * 80, "넷째 줄"],
+                 body=long_body + " The central bank kept its policy rate unchanged at the meeting.",
+                 numbers=["정책금리 4.25%", "지어낸 숫자 9.99%", "다음 회의 12월 17일", "하나 1", "둘 2", "셋 3", "넷 4"],
+                 impact="코인에 부담 (추정)")
+    s = {**clean_summary(raw, SRC + " 1 2 3 4", "원문"), "basis": "원문"}
+    assert "The central bank kept" not in " ".join(s["lead"]) + s["body"]  # copied run dropped
+    assert all(len(x) <= 60 for x in s["lead"]) and all("“" not in x for x in s["lead"])
+    assert len(sentences(s["body"])) == 10  # capped at 10
+    assert "지어낸 숫자 9.99%" not in s["numbers"] and len(s["numbers"]) == 5
+    assert s["impact"] == "코인에 부담 (추정)"  # not doubled
+    assert not [p for p in format_problems(s, SRC) if p.startswith(("copied", "quote", "too long"))]
+    t = {**clean_summary(v2_raw(), "Rates held", "제목만"), "basis": "제목만"}
+    assert len(t["lead"]) == 2 and len(sentences(t["body"])) <= 2 and format_problems(t, "Rates held") == []
+    none = {**clean_summary(v2_raw(impact=""), SRC, "원문"), "basis": "원문"}
+    assert none["impact"] == "코인 시장과 직접 관련은 적음 (추정)"
+    short = {**clean_summary(v2_raw(body="한 문장뿐이다."), SRC, "원문"), "basis": "원문"}
+    assert any(p.startswith("body 1 sentences") for p in format_problems(short, SRC))
 
 
 def test_copied_run_threshold():
@@ -171,21 +197,23 @@ class FakeHaiku:
 
     def create(self, **kw):
         self.calls += 1
+        assert kw["thinking"] == {"type": "disabled"} and kw["model"] == "claude-haiku-5-5"
         lines = kw["messages"][0]["content"].split("\n")[1:]
         out = []
         for l in lines:
             it = json.loads(l)
             self.inputs.append(it)
-            pts = (["중앙은행이 정책금리를 4.25%로 묶어 둠", "물가가 목표보다 높아 추가 조정은 지표를 보고 정함",
-                    "시장 예상과 같아 채권 금리 반응은 작았음", "다음 회의는 12월 17일"]
-                   if it["basis"] == "원문" else ["제목 기준: 금리 동결 소식"])
-            out.append({"id": it["id"], "points": pts, "numbers": ["정책금리 4.25%"] if it["basis"] == "원문" else []})
+            if it["basis"] == "원문":
+                out.append({"id": it["id"], **v2_raw()})
+            else:
+                out.append({"id": it["id"], "lead": ["제목 기준: 금리 동결 소식"], "body": "제목으로 본 내용은 금리 동결이다.",
+                            "numbers": [], "impact": "직접 관련 적음"})
         return SimpleNamespace(stop_reason="end_turn",
                                content=[SimpleNamespace(type="text", text=json.dumps({"summaries": out}, ensure_ascii=False))],
                                usage=SimpleNamespace(input_tokens=3000, output_tokens=600))
 
 
-def make_summarizer(tmp_path, cap=0.10, global_cap=2.0):
+def make_summarizer(tmp_path, cap=0.30, global_cap=2.0):
     b = DailyBudget(tmp_path / "cost_ledger.json", global_cap, "claude-haiku-5-5")
     s = Summarizer("sk-test", "claude-haiku-5-5", b, cap)
     fake = FakeHaiku()
@@ -194,23 +222,34 @@ def make_summarizer(tmp_path, cap=0.10, global_cap=2.0):
 
 
 def test_summarizer_counts_cost_separately_and_stops_at_cap(tmp_path):
-    s, fake, b = make_summarizer(tmp_path, cap=0.0021)  # each call: 3000*0.1/1e6 + 600*0.5/1e6 = $0.0006
-    items = [{"id": f"i{k}", "source": "BBC", "title": "Rates held", "text": SRC, "basis": "원문"} for k in range(40)]
+    s, fake, b = make_summarizer(tmp_path, cap=0.0045)  # each call costs $0.0006; worst-case pre-check ~$0.0026
+    items = [{"id": f"i{k}", "source": "BBC", "title": "Rates held", "text": SRC, "basis": "원문", "importance": 5}
+             for k in range(40)]
     done, stop = s.summarize(items)
     assert stop and stop.startswith(SUMMARY_STOPPED)
-    assert b.spent_for("summarize") <= 0.0021 and b.spent_for("classify") == 0
-    assert 0 < len(done) < 40 and fake.calls == len(done) // 4
+    assert b.spent_for("summarize") <= 0.0045 and b.spent_for("classify") == 0
+    assert 0 < len(done) < 40 and fake.calls == len(done) // 3
     one = next(iter(done.values()))
-    assert one["basis"] == "원문" and one["read_at"] and one["numbers"] == ["정책금리 4.25%"]
+    assert one["basis"] == "원문" and one["read_at"] and one["numbers"][0] == "정책금리 4.25%" and one["format"] == 2
     assert "claude-haiku-5-5:summarize" in b.day()["by_model"]
+
+
+TITLES = ["Fed holds rates", "Tesla earnings beat", "XLM network upgrade", "Oil jumps on supply cut",
+          "Japan yen weakens", "ECB keeps policy", "Gold demand rises", "Korea exports grow", "Solana outage ends",
+          "Coinbase lists token"]
+
+
+KO = ["연준 금리 동결", "테슬라 실적 호조", "스텔라 네트워크 개편", "감산에 유가 급등", "엔화 약세 지속", "유럽중앙은행 정책 유지",
+      "금 수요 증가", "한국 수출 증가", "솔라나 장애 해소", "코인베이스 신규 상장"]
 
 
 def row(i, imp=4, coins=(), url=None, hours=1):
     t = datetime(2026, 11, 17, 0, tzinfo=timezone.utc).timestamp() - hours * 3600
     iso = datetime.fromtimestamp(t, timezone.utc).isoformat()
     return {"id": f"r{i}", "collected_at": iso, "published_at": iso, "source": "BBC", "source_kind": "rss",
-            "group": "macro", "title": f"Rates held {i}", "summary": "The bank held rates.", "url": url or f"https://x/{i}",
-            "classified": True, "importance": imp, "coins": list(coins), "summary_ko": "금리 동결"}
+            "group": "macro", "title": TITLES[i % len(TITLES)], "summary": "The bank held rates.",
+            "url": url or f"https://x/{i}",
+            "classified": True, "importance": imp, "coins": list(coins), "summary_ko": KO[i % len(KO)]}
 
 
 class FakeReader:
@@ -223,9 +262,11 @@ class FakeReader:
         return (SRC, "ok") if url in self.ok else ("", "blocked:403")
 
 
-def test_collector_summarizes_only_important_and_my_coins(tmp_path):
-    rows = [row(1, 5), row(2, 2), row(3, 2, coins=["XLM"]), row(4, 3), row(5, 1), row(6, 4, hours=30),
-            {**row(7, None), "classified": False}]
+def test_collector_summarizes_all_classified_except_noise_and_old(tmp_path):
+    rows = [row(1, 5), row(2, 2), row(3, 1, coins=["XLM"]), row(4, 3), row(5, 1), row(6, 4, hours=30),
+            {**row(7, None), "classified": False},
+            {**row(8, 2), "title": "Bitcoin price prediction: will BTC hit $100K?"},  # noise
+            {**row(9, 4), "group": "exchange", "source_kind": "binance_notice"}]       # notice, not my coin
     (tmp_path / "news_events.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
     s, fake, b = make_summarizer(tmp_path)
     fr = FakeReader({"https://x/1", "https://x/4"})
@@ -233,28 +274,69 @@ def test_collector_summarizes_only_important_and_my_coins(tmp_path):
     col = Collector(cfg, data_dir=tmp_path, macro=False, summarizer=s, reader=fr)
     now = datetime(2026, 11, 17, 0, tzinfo=timezone.utc)
     out = col.summarize_pending(now)
-    assert sorted(fr.urls) == ["https://x/1", "https://x/3", "https://x/4"]  # imp>=3 or my coin, last 24h
-    assert out["summarized"] == 3 and out["read"] == {"ok": 2, "blocked": 1}
+    assert fr.urls == ["https://x/1", "https://x/4", "https://x/2", "https://x/3", "https://x/5"]  # importance order
+    assert out["summarized"] == 5 and out["read"] == {"ok": 2, "blocked": 3}
+    assert out["read_by_source"] == {"BBC": {"ok": 2, "blocked": 3}}
     ev = {r["id"]: r for r in load_events(tmp_path)}
     assert ev["r1"]["body_summary"]["basis"] == "원문" and ev["r3"]["body_summary"]["basis"] == "제목만"
-    assert "body_summary" not in ev["r2"]
+    assert all("body_summary" not in ev[k] for k in ("r6", "r7", "r8", "r9"))
     assert col.summarize_pending(now) is None  # nothing left
     f = build_feed(tmp_path, {}, [], {}, now, summary_status=col.summary_status)
     items = {i["id"]: i for i in f["items"]}
-    assert items["r1"]["body_summary"]["points"] and items["r2"]["body_summary"] is None
-    assert f["summary_status"] == "ok" and f["counts"]["body_summaries"] == 3
-    # backward compatible: every v2 field still there
+    assert items["r1"]["body_summary"]["lead"] and items["r8"]["body_summary"] is None
+    assert f["summary_status"] == "ok" and f["counts"]["body_summaries"] == 5
     for k in ("id", "published_at", "source", "topic", "title", "url", "summary_ko", "why", "crypto_impact",
               "event_type", "direction", "importance", "importance_label", "important", "status", "coins",
-              "my_coins", "classified"):
-        assert k in items["r1"]
+              "my_coins", "classified", "body_summary"):
+        assert k in items["r1"]  # older fields unchanged
     assert not (tmp_path / "articles").exists() and SRC not in (tmp_path / "summaries.jsonl").read_text(encoding="utf-8")
+
+
+def test_same_story_summarised_once_and_counted(tmp_path):
+    base = {**row(1, 4), "title": "Fed holds rates", "summary_ko": "연준 금리 동결"}
+    rows = [base,
+            {**row(2, 3), "title": "Fed holds rates steady", "summary_ko": "연준 금리 동결"},
+            {**row(3, 2), "title": "Fed holds rates, signals patience", "source": "CNBC"},
+            row(4, 3)]
+    (tmp_path / "news_events.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    s, fake, b = make_summarizer(tmp_path)
+    cfg = {"api_key": "", "base_url": None, "model": "claude-haiku-5-5", "cap": 2.0, "interval": 300}
+    col = Collector(cfg, data_dir=tmp_path, macro=False, summarizer=s, reader=FakeReader({"https://x/1"}))
+    now = datetime(2026, 11, 17, 0, tzinfo=timezone.utc)
+    out = col.summarize_pending(now)
+    assert out["summarized"] == 2 and out["same_story_linked"] == 2  # r1 + r4 summarised, r2 r3 linked to r1
+    ev = {r["id"]: r for r in load_events(tmp_path)}
+    assert ev["r1"]["same_story"] == {"count": 3, "ids": ["r2", "r3"]}
+    assert ev["r2"]["same_as"] == "r1" and ev["r2"]["body_summary"] == ev["r1"]["body_summary"]
+    # a later article on the same story is linked without another model call
+    (tmp_path / "news_events.jsonl").open("a", encoding="utf-8").write(
+        json.dumps({**row(5, 4), "title": "Fed holds rates again"}) + "\n")
+    calls = fake.calls
+    out2 = col.summarize_pending(now)
+    assert out2["same_story_linked"] == 1 and out2["summarized"] == 0 and fake.calls == calls
+    f = build_feed(tmp_path, {}, [], {}, now)
+    covered = sum(1 for i in f["items"] if i["body_summary"])
+    assert covered == 5  # 100% of the day's articles readable
+    assert same_story({"title": "ECB keeps policy"}, {"title": "Tesla earnings beat"}) is False
+
+
+def test_priority_near_cap_low_importance_stops_first(tmp_path):
+    assert [min_importance(x, 0.30) for x in (0.0, 0.17, 0.19, 0.25, 0.26)] == [1, 1, 3, 3, 4]
+    s, fake, b = make_summarizer(tmp_path, cap=0.30)
+    b.record(SimpleNamespace(input_tokens=0, output_tokens=400_000), "claude-haiku-5-5", "summarize")  # $0.20 spent
+    items = [{"id": f"i{k}", "source": "BBC", "title": "t", "text": SRC, "basis": "원문", "importance": imp,
+              "my_coin": mine} for k, (imp, mine) in enumerate([(5, False), (2, False), (1, True), (3, False)])]
+    done, stop = s.summarize(items)
+    assert set(done) == {"i0", "i2", "i3"} and stop is None  # 67% used: importance >= 3 or my coin
+    b.record(SimpleNamespace(input_tokens=0, output_tokens=120_000), "claude-haiku-5-5", "summarize")  # ~87%
+    done, stop = s.summarize([{**items[3], "id": "j3"}, {**items[2], "id": "j2"}])
+    assert set(done) == {"j2"} and stop is None or set(done) == {"j2"} and "일부 멈춤" in (stop or "")
 
 
 def test_collector_cap_sets_status_for_the_day(tmp_path):
     rows = [row(i, 4) for i in range(10)]
     (tmp_path / "news_events.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
-    s, fake, b = make_summarizer(tmp_path, cap=0.0016)  # worst case ~$0.00136 per call: room for exactly one
+    s, fake, b = make_summarizer(tmp_path, cap=0.0029)  # worst case ~$0.0026 per call: room for exactly one
     cfg = {"api_key": "", "base_url": None, "model": "claude-haiku-5-5", "cap": 2.0, "interval": 300}
     col = Collector(cfg, data_dir=tmp_path, macro=False, summarizer=s, reader=FakeReader(set()))
     now = datetime(2026, 11, 17, 0, tzinfo=timezone.utc)
@@ -266,11 +348,14 @@ def test_collector_cap_sets_status_for_the_day(tmp_path):
 
 
 def test_needs_summary():
-    assert needs_summary({"classified": True, "importance": 3})
-    assert needs_summary({"classified": True, "importance": 1, "coins": ["BTC"]})
-    assert not needs_summary({"classified": True, "importance": 2, "coins": ["ETH"]})
+    assert needs_summary({"classified": True, "importance": 1, "title": "x"})
+    assert needs_summary({"classified": True, "importance": 1, "coins": ["XLM"], "group": "exchange", "title": "x"})
+    assert not needs_summary({"classified": True, "importance": 4, "group": "exchange", "title": "x"})
+    assert not needs_summary({"classified": True, "importance": 3, "title": "[광고] 코인 이벤트"})
+    assert not needs_summary({"classified": True, "importance": 3, "title": "XRP price analysis: bulls eye $3"})
     assert not needs_summary({"classified": False, "importance": None, "coins": ["XLM"]})
-    assert not needs_summary({"classified": True, "importance": 5, "body_summary": {"points": ["x"]}})
+    assert not needs_summary({"classified": True, "importance": 5, "body_summary": {"lead": ["x"]}})
+    assert not needs_summary({"classified": True, "importance": 5, "same_as": "r1"})
 
 
 def test_numbers_allow_unit_conversion_but_not_invented():
